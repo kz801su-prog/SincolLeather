@@ -36,7 +36,8 @@ const mapRowToTask = (rawRow: any[], sheetRowNumber: number): Task | null => {
 
   // Check valid row: must have Title(3) OR Person(1) OR Date(0)
   // Also filter out obvious header rows if they slipped through
-  if (row[3] === 'タイトル' || row[0]?.includes('Last Updated') || row[0]?.includes('Board Tracker')) return null;
+  const cell3 = String(row[3] || '').trim();
+  if (cell3 === 'タイトル' || cell3 === '項目' || cell3 === 'Title' || cell3 === 'Task' || row[0]?.includes('Last Updated') || row[0]?.includes('Board Tracker')) return null;
 
   const hasContent = row[0] || row[1] || row[3];
   if (!hasContent) return null;
@@ -61,7 +62,11 @@ const mapRowToTask = (rawRow: any[], sheetRowNumber: number): Task | null => {
   const attachmentsJson = row[17] || '[]';
   const dependenciesJson = row[18] || '[]';
   const evaluationJson = row[19] || 'null';
-  const uuid = row[20] || (typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `uuid-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+
+  // ★ 修正: GASから26列目に物理行番号が送られてきている場合はそれを使用する
+  const finalSheetRowNumber = row[25] ? parseInt(row[25], 10) : sheetRowNumber;
+  const uuid = row[20] || `row-uuid-${finalSheetRowNumber}`;
+
   const parentId = row[21] || '';
   let hierarchyType = row[22] || '';
   const trackId = row[23] || '';
@@ -104,7 +109,7 @@ const mapRowToTask = (rawRow: any[], sheetRowNumber: number): Task | null => {
   }).reverse() : [];
 
   return {
-    id: `sheet-${sheetRowNumber}`, // Use actual sheet row number for ID
+    id: `sheet-${finalSheetRowNumber}`, // Use actual sheet row number for ID
     date, department: dept, project: project || '未分類',
     responsiblePerson: person, team: safeJsonParse<string[]>(teamJson, []),
     title, goal, startDate, dueDate,
@@ -122,77 +127,6 @@ const mapRowToTask = (rawRow: any[], sheetRowNumber: number): Task | null => {
     hierarchyType: hierarchyType as any,
     trackId
   } as Task;
-};
-
-/**
- * 2つのタスクデータをマージする (ユーザー要望: データ量が多い方を優先、ないデータを足す)
- */
-export const mergeTasks = (taskA: Task, taskB: Task): Task => {
-  // 削除フラグは「どちらかが削除済みなら削除済み」とする（削除が優先）
-  const isSoftDeleted = taskA.isSoftDeleted || taskB.isSoftDeleted || false;
-  // 基本的なフィールドのマージ（空でない方を優先、または文字数が多い方を優先）
-  const pickRich = (valA: any, valB: any) => {
-    if (valA === undefined || valA === null || valA === '') return valB;
-    if (valB === undefined || valB === null || valB === '') return valA;
-    if (typeof valA === 'string' && typeof valB === 'string') {
-      return valA.length >= valB.length ? valA : valB;
-    }
-    return valA;
-  };
-
-  // 配列系データのマージ (IDや内容で重複排除)
-  const mergeArrays = <T>(arrA: T[] | undefined, arrB: T[] | undefined, key: keyof T): T[] => {
-    const combined = [...(arrA || []), ...(arrB || [])];
-    const map = new Map();
-    combined.forEach(item => {
-      const k = item[key];
-      if (!map.has(k)) {
-        map.set(k, item);
-      } else {
-        // 同じIDがある場合、より情報量が多い（プロパティが多い）方を保持する等の工夫も可能だが、
-        // 現状は最初に見つけたものを優先
-      }
-    });
-    return Array.from(map.values());
-  };
-
-  // 進捗(progress)は内容と日付で重複排除
-  const mergeProgress = (pA: any[] = [], pB: any[] = []) => {
-    const combined = [...pA, ...pB];
-    const map = new Map();
-    combined.forEach(p => {
-      const k = `${p.updatedAt}-${p.content}`;
-      if (!map.has(k)) map.set(k, p);
-    });
-    return Array.from(map.values()).sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-  };
-
-  // 既読状態(lastViewedBy)はユーザーごとに最新のタイムスタンプを保持
-  const mergeLastViewed = (lvA: any[] = [], lvB: any[] = []) => {
-    const combined = [...lvA, ...lvB];
-    const map = new Map();
-    combined.forEach(v => {
-      if (!map.has(v.userName) || new Date(v.timestamp).getTime() > new Date(map.get(v.userName).timestamp).getTime()) {
-        map.set(v.userName, v);
-      }
-    });
-    return Array.from(map.values());
-  };
-
-  return {
-    ...taskA,
-    ...taskB, // Bで上書きできるものはする
-    isSoftDeleted, // 削除フラグは OR ロジックで明示的に設定
-    title: pickRich(taskA.title, taskB.title),
-    goal: pickRich(taskA.goal, taskB.goal),
-    responsiblePerson: pickRich(taskA.responsiblePerson, taskB.responsiblePerson),
-    status: (taskA.status === TaskStatus.COMPLETED || taskB.status === TaskStatus.COMPLETED) ? TaskStatus.COMPLETED : (taskA.status || taskB.status),
-    progress: mergeProgress(taskA.progress, taskB.progress),
-    comments: mergeArrays(taskA.comments, taskB.comments, 'id'),
-    attachments: mergeArrays(taskA.attachments, taskB.attachments, 'id'),
-    lastViewedBy: mergeLastViewed(taskA.lastViewedBy, taskB.lastViewedBy),
-    evaluation: taskA.evaluation || taskB.evaluation, // 評価がある方を優先
-  };
 };
 
 export const fetchTasksFromSheet = async (gasUrl?: string): Promise<{ tasks: Task[], projectConcept?: ProjectConcept, epics: string[] }> => {
@@ -220,34 +154,72 @@ export const fetchTasksFromSheet = async (gasUrl?: string): Promise<{ tasks: Tas
     const data = JSON.parse(jsonString);
     const rows = data.table.rows;
 
-    const stringRows = rows.map((r: any) =>
-      r.c.map((cell: any) => cell && cell.v !== null ? String(cell.v) : '')
-    );
+    const stringRows = rows.map((r: any) => {
+      const row = r.c.map((cell: any) => cell && cell.v !== null ? String(cell.v) : '');
+      // パディング
+      while (row.length < 25) row.push('');
+      return row;
+    });
 
     let headerIndex = -1;
-    for (let i = 0; i < Math.min(stringRows.length, 5); i++) {
-      if (stringRows[i][3] === 'タイトル') {
+    for (let i = 0; i < Math.min(stringRows.length, 15); i++) {
+      const cellValue = String(stringRows[i][3] || '').trim();
+      if (cellValue === 'タイトル' || cellValue === '項目' || cellValue === 'Title' || cellValue === 'Task') {
         headerIndex = i;
         break;
       }
     }
 
+    if (headerIndex === -1) {
+      console.warn("Header row not found in Gviz data, defaulting to index 2 (row 3)");
+      headerIndex = 2;
+    }
+
     const resultTasks: Task[] = [];
     stringRows.forEach((row: string[], index: number) => {
       if (index <= headerIndex) return;
-      const sheetRowNumber = headerIndex === -1 ? index + 4 : (index - headerIndex) + 3;
+      // 物理行番号は単純に index + 1 (Gvizは全シートを返すため)
+      const sheetRowNumber = index + 1;
       const task = mapRowToTask(row, sheetRowNumber);
       if (task) resultTasks.push(task);
     });
 
-    // Deduplicate by UUID, merging data instead of just overwriting
+    // Deduplicate by Title + Responsible Person + Project, keeping the one with the latest activity
+    const getLatestActivityDateFromTask = (t: Task): number => {
+      let maxDate = new Date(t.date || 0).getTime();
+      if (Array.isArray(t.progress)) {
+        t.progress.forEach(p => {
+          const d = new Date(p.updatedAt || 0).getTime();
+          if (!isNaN(d) && d > maxDate) maxDate = d;
+        });
+      }
+      if (Array.isArray(t.comments)) {
+        t.comments.forEach(c => {
+          const d = new Date(c.createdAt || 0).getTime();
+          if (!isNaN(d) && d > maxDate) maxDate = d;
+        });
+      }
+      return maxDate;
+    };
+
     const taskMap = new Map<string, Task>();
     resultTasks.forEach(t => {
-      const key = t.uuid || t.id;
-      if (taskMap.has(key)) {
-        taskMap.set(key, mergeTasks(taskMap.get(key)!, t));
-      } else {
+      const key = `${t.title}|${t.responsiblePerson}|${t.project}`;
+      const existing = taskMap.get(key);
+      if (!existing) {
         taskMap.set(key, t);
+      } else {
+        const existingDate = getLatestActivityDateFromTask(existing);
+        const currentDate = getLatestActivityDateFromTask(t);
+        if (currentDate > existingDate) {
+          taskMap.set(key, t);
+        } else if (currentDate === existingDate) {
+          const existingRow = parseInt(existing.id.replace('sheet-', ''), 10);
+          const currentRow = parseInt(t.id.replace('sheet-', ''), 10);
+          if (currentRow > existingRow) {
+            taskMap.set(key, t);
+          }
+        }
       }
     });
 
@@ -272,22 +244,59 @@ export const fetchTasksFromSheet = async (gasUrl?: string): Promise<{ tasks: Tas
 
         if (result.status === 'success') {
           clearTimeout(timeoutId);
+          console.log(`GAS fetch success: ${result.data.length} rows found. Header at row ${result.headerRowIndex + 1}`);
           const stringRows = result.data.map((row: any[]) => row.map(cell => cell !== null ? String(cell) : ''));
           const resultTasks: Task[] = [];
+          
+          // GAS側で物理行番号(26列目)が計算されているため、それを使用する
+          // フォールバックとして headerRowIndex を使用する
+          const headerOffset = (result.headerRowIndex !== undefined ? result.headerRowIndex : 2) + 2;
+
           stringRows.forEach((row: string[], index: number) => {
-            const sheetRowNumber = index + 4;
+            // row[25]に物理行番号が入っているはず
+            const sheetRowNumber = row[25] ? parseInt(row[25], 10) : (index + headerOffset);
             const task = mapRowToTask(row, sheetRowNumber);
             if (task) resultTasks.push(task);
           });
 
-          // Deduplicate by UUID, merging data
+          console.log(`Mapped ${resultTasks.length} tasks from GAS data`);
+
+          // Deduplicate by Title + Responsible Person + Project, keeping the one with the latest activity
+          const getLatestActivityDateFromTask = (t: Task): number => {
+            let maxDate = new Date(t.date || 0).getTime();
+            if (Array.isArray(t.progress)) {
+              t.progress.forEach(p => {
+                const d = new Date(p.updatedAt || 0).getTime();
+                if (!isNaN(d) && d > maxDate) maxDate = d;
+              });
+            }
+            if (Array.isArray(t.comments)) {
+              t.comments.forEach(c => {
+                const d = new Date(c.createdAt || 0).getTime();
+                if (!isNaN(d) && d > maxDate) maxDate = d;
+              });
+            }
+            return maxDate;
+          };
+
           const taskMap = new Map<string, Task>();
           resultTasks.forEach(t => {
-            const key = t.uuid || t.id;
-            if (taskMap.has(key)) {
-              taskMap.set(key, mergeTasks(taskMap.get(key)!, t));
-            } else {
+            const key = `${t.title}|${t.responsiblePerson}|${t.project}`;
+            const existing = taskMap.get(key);
+            if (!existing) {
               taskMap.set(key, t);
+            } else {
+              const existingDate = getLatestActivityDateFromTask(existing);
+              const currentDate = getLatestActivityDateFromTask(t);
+              if (currentDate > existingDate) {
+                taskMap.set(key, t);
+              } else if (currentDate === existingDate) {
+                const existingRow = parseInt(existing.id.replace('sheet-', ''), 10);
+                const currentRow = parseInt(t.id.replace('sheet-', ''), 10);
+                if (currentRow > existingRow) {
+                  taskMap.set(key, t);
+                }
+              }
             }
           });
 
@@ -508,5 +517,29 @@ export const syncAllTasksToSheet = async (
       throw new Error("【重要設定エラー】GASのコードが古いバージョンで動いています。GASエディタにて「新しいデプロイ」を作成し、新しいURLを設定し直してください！");
     }
     throw new Error("全同期に失敗: " + msg);
+  }
+};
+
+export const cleanupSheet = async (gasUrl: string): Promise<boolean> => {
+  if (!gasUrl) throw new Error('GAS URL not set');
+
+  const payload = {
+    action: 'cleanup_sheet'
+  };
+
+  try {
+    // GASの制限(CORS)を回避するため、no-corsモードで送信します。
+    // これによりレスポンスの中身は見られなくなりますが、命令は確実にGASに届きます。
+    await fetch(gasUrl, {
+      method: 'POST',
+      mode: 'no-cors',
+      body: JSON.stringify(payload),
+      headers: { 'Content-Type': 'text/plain' }
+    });
+    return true;
+  } catch (error: any) {
+    console.error("Cleanup failed:", error);
+    const msg = error.message || '';
+    throw new Error("クリーンアップ通信に失敗: " + msg);
   }
 };

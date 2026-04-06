@@ -6,7 +6,7 @@ import { Task, TaskStatus, TaskPriority, User } from './types';
 // =========================================================
 
 // 1. Google Apps Script (GAS) のウェブアプリURL
-export const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbzjVQlPyYqqu9yfDjc70d_NF7cNGrnC4rnnDwYOUtcm7ri3C8I2zYqK_FdxkjfhbjFO/exec'; 
+export const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbyvR-wEq_9uAO5j7N6WcO-9wWktAUHzFj2EFCIG5LPsHbw563W_z25LEjlAg5fJIdmn/exec'; 
 
 // 2. Zoho Cliq の Webhook URL (チャット通知用)
 export const DEFAULT_CLIQ_URL = 'https://cliq.zoho.com/api/v2/channelsbyname/tnzcd/message?zapikey=1001.c4e498597d7ecb17a361dc28ca531e5a.08ffaf17c758fce2840d1bae11abb486'; 

@@ -3,10 +3,10 @@ import {
   List, Calendar, Settings, RefreshCw, Plus, Search,
   CloudUpload, BrainCircuit, X, LayoutGrid, Loader2,
   Armchair, ShieldCheck, Users, Trash2, UserPlus, Lock, CheckCircle, AlertTriangle, LogOut, Link as LinkIcon, Activity,
-  FileCode, Copy, Check, Award, Briefcase, Edit2, Bell, Star, TrendingUp, Target, CheckCircle2
+  FileCode, Copy, Check, Award, Briefcase, Edit2, Bell, Star, TrendingUp, Target, CheckCircle2, Trash
 } from 'lucide-react';
 import { Task, TaskStatus, TaskPriority, MemberInfo, TaskComment, ProjectConcept, Attachment } from './types';
-import { fetchTasksFromSheet, syncAllTasksToSheet, saveSingleTaskToSheet, saveProjectConceptToSheet, saveEpicsToSheet, mergeTasks } from './googleSheetsService';
+import { fetchTasksFromSheet, syncAllTasksToSheet, saveSingleTaskToSheet, saveProjectConceptToSheet, saveEpicsToSheet, cleanupSheet } from './googleSheetsService';
 import { analyzeProgress } from './geminiService';
 import { DashboardCards } from './components/DashboardCards';
 import { TaskItem } from './components/TaskItem';
@@ -14,12 +14,11 @@ import { TimelineView } from './components/TimelineView';
 import { MatrixView } from './components/MatrixView';
 import { EvaluationView } from './components/EvaluationView';
 import { EpicListView } from './components/EpicListView';
-import { ActivityFeed } from './components/ActivityFeed';
 import { DEFAULT_GAS_URL, INITIAL_TASKS, DEFAULT_CLIQ_URL, MEMBERS as INITIAL_MEMBERS, ADMIN_USER_NAME, SHEET_GID, DEFAULT_PROJECTS } from './constants';
 
 import GAS_CODE from './server/Code.js?raw';
 
-const APP_VERSION = "v12.1-HIERARCHY";
+const APP_VERSION = "v12.2-CLEANUP-FIX";
 
 const App: React.FC = () => {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -33,9 +32,6 @@ const App: React.FC = () => {
   const [initialTaskTab, setInitialTaskTab] = useState<'basic' | 'chat' | 'files' | 'hierarchy'>('basic');
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [copySuccess, setCopySuccess] = useState(false);
-  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const isSavingRef = useRef(false);
-  const pendingSaveRef = useRef<{ task: Task; immediate: boolean } | null>(null);
 
   // GAS URLの二重化を自動修正するサニタイザー
   const sanitizeGasUrl = (url: string | null): string => {
@@ -98,6 +94,8 @@ const App: React.FC = () => {
   const [isAiAnalyzing, setIsAiAnalyzing] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [showPushConfirm, setShowPushConfirm] = useState(false);
+  const [showCleanupConfirm, setShowCleanupConfirm] = useState<{ show: boolean; title: string; message: string; onConfirm: () => void } | null>(null);
+  const [messageModal, setMessageModal] = useState<{ show: boolean; title: string; message: string } | null>(null);
   const [timelineSelectedTaskId, setTimelineSelectedTaskId] = useState<string | null>(null);
 
   const [newEpicName, setNewEpicName] = useState('');
@@ -132,11 +130,45 @@ const App: React.FC = () => {
     }, 0);
   }, [tasks, settings.userName]);
 
+  const saveQueueRef = useRef<Map<string, Task>>(new Map());
+  const isSavingRef = useRef(false);
+  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const processQueue = useCallback(async () => {
+    if (isSavingRef.current || saveQueueRef.current.size === 0) return;
+
+    isSavingRef.current = true;
+    
+    // キューから最初のタスクを取得
+    const nextEntry = saveQueueRef.current.entries().next().value;
+    if (!nextEntry) {
+      isSavingRef.current = false;
+      return;
+    }
+    const [taskId, taskToSave] = nextEntry;
+    saveQueueRef.current.delete(taskId);
+
+    try {
+      console.log("[SaveQueue] Executing save for:", taskToSave.title, "uuid:", taskToSave.uuid);
+      await saveSingleTaskToSheet(taskToSave, settings.gasUrl, undefined, members, undefined, settings.cliqUrl);
+      console.log("[SaveQueue] Save completed for:", taskToSave.title);
+    } catch (e: any) {
+      setErrorMsg(e.message || "タスクの保存に失敗しました");
+      console.error("Save error:", e);
+    } finally {
+      isSavingRef.current = false;
+      // 次のタスクがあれば少し間を置いて実行 (GASのロック解放待ち)
+      if (saveQueueRef.current.size > 0) {
+        setTimeout(processQueue, 500);
+      }
+    }
+  }, [settings.gasUrl, members, settings.cliqUrl]);
+
   // セーブキュー: 同時に1つしかPOSTが走らないようにする
-  const handleSingleTaskSave = useCallback(async (task: Task, immediate = false) => {
+  const handleSingleTaskSave = useCallback((task: Task, immediate = false) => {
     if (!settings.gasUrl) {
       if (immediate) {
-        alert("設定画面でGAS WebアプリのURLを入力してください。保存できません。");
+        setErrorMsg("設定画面でGAS WebアプリのURLを入力してください。保存できません。");
         setShowSettingsModal(true);
       }
       return;
@@ -144,144 +176,92 @@ const App: React.FC = () => {
 
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
 
-    const executeSave = async (t: Task) => {
-      if (isSavingRef.current) {
-        // 既に保存中なら、最新のタスクだけキューに入れて待つ
-        console.log("[SaveQueue] Save already in-flight, queuing:", t.title);
-        pendingSaveRef.current = { task: t, immediate: true };
-        return;
-      }
-
-      isSavingRef.current = true;
-      try {
-        console.log("[SaveQueue] Executing save for:", t.title, "uuid:", t.uuid);
-        await saveSingleTaskToSheet(t, settings.gasUrl, undefined, members, undefined, settings.cliqUrl);
-        console.log("[SaveQueue] Save completed for:", t.title);
-      } catch (e: any) {
-        alert(e.message || "タスクの保存に失敗しました");
-        console.error("Save error:", e);
-      } finally {
-        isSavingRef.current = false;
-        // キューに溜まっている保存があれば次に実行
-        if (pendingSaveRef.current) {
-          const pending = pendingSaveRef.current;
-          pendingSaveRef.current = null;
-          console.log("[SaveQueue] Processing queued save for:", pending.task.title);
-          // 少し間を空けてGASのロック解放を待つ
-          setTimeout(() => executeSave(pending.task), 500);
-        }
-      }
+    const addToQueue = (t: Task) => {
+      saveQueueRef.current.set(t.id, t);
+      processQueue();
     };
 
     if (immediate) {
-      executeSave(task);
+      addToQueue(task);
     } else {
-      saveTimeoutRef.current = setTimeout(async () => {
-        await executeSave(task);
+      saveTimeoutRef.current = setTimeout(() => {
+        addToQueue(task);
         saveTimeoutRef.current = null;
       }, 1500);
     }
-  }, [settings.gasUrl, members, settings.cliqUrl]);
+  }, [settings.gasUrl, processQueue]);
 
   const markTaskAsViewed = useCallback((taskId: string) => {
     if (!settings.userName) return;
 
-    // state updater の外で保存するためにタスクを一時保持
-    let taskToSave: Task | null = null;
-
+    let updatedTaskToSave: Task | null = null;
     setTasks(prevTasks => {
       const taskIndex = prevTasks.findIndex(t => t.id === taskId);
       if (taskIndex === -1) return prevTasks;
 
       const task = prevTasks[taskIndex];
-      const now = new Date().toISOString();
+      
+      // 既読時間を計算 (現在の時刻と、タスク内の最新更新時刻の大きい方を使う)
+      // これにより、端末間の時刻ズレでNewマークが消えない問題を回避する
+      let latestActivityTime = new Date().getTime();
+      if (task.progress) {
+        task.progress.forEach(p => {
+          const d = new Date(p.updatedAt).getTime();
+          if (!isNaN(d) && d > latestActivityTime) latestActivityTime = d;
+        });
+      }
+      if (task.comments) {
+        task.comments.forEach(c => {
+          const d = new Date(c.createdAt).getTime();
+          if (!isNaN(d) && d > latestActivityTime) latestActivityTime = d;
+        });
+      }
+      
+      const now = new Date(latestActivityTime).toISOString();
 
       const lastViewedBy = [...(task.lastViewedBy || [])];
       const userViewIndex = lastViewedBy.findIndex(v => v.userName === settings.userName);
 
-      const updatedLastViewedBy = userViewIndex !== -1
-        ? lastViewedBy.map((v, i) => i === userViewIndex ? { ...v, timestamp: now } : v)
-        : [...lastViewedBy, { userId: settings.userName, userName: settings.userName, timestamp: now }];
+      let updatedLastViewedBy;
+      if (userViewIndex !== -1) {
+        updatedLastViewedBy = [...lastViewedBy];
+        updatedLastViewedBy[userViewIndex] = { ...lastViewedBy[userViewIndex], timestamp: now };
+      } else {
+        updatedLastViewedBy = [...lastViewedBy, { userId: settings.userName, userName: settings.userName, timestamp: now }];
+      }
 
       const updatedTask = { ...task, lastViewedBy: updatedLastViewedBy };
-      taskToSave = updatedTask;
+      updatedTaskToSave = updatedTask;
 
       const nextTasks = [...prevTasks];
       nextTasks[taskIndex] = updatedTask;
       return nextTasks;
     });
 
-    // 既読状態をGASに保存（state updater の外で実行 - Reactアンチパターン回避）
-    // デバウンスタイマーとの競合を避けるため setTimeout で非同期に実行
-    setTimeout(() => {
-      if (taskToSave) handleSingleTaskSave(taskToSave, false);
-    }, 0);
+    // updaterの外で保存を実行
+    if (updatedTaskToSave) {
+      handleSingleTaskSave(updatedTaskToSave, true);
+    }
   }, [settings.userName, handleSingleTaskSave]);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     setErrorMsg(null);
     try {
-      // 1. まずサーバーから最新データを取得
       const fetched = await fetchTasksFromSheet(settings.gasUrl);
-      const serverTasks = fetched.tasks;
-
-      // 2. ブラウザのキャッシュ（手元の控え）を取得
-      const cachedStr = localStorage.getItem('board_tasks_v3');
-      let finalTasks = serverTasks;
-
-      if (cachedStr) {
-        try {
-          const cachedTasks: Task[] = JSON.parse(cachedStr);
-          // サーバーのデータと手元のデータを1つずつ見比べてマージ
-          const serverMap = new Map(serverTasks.map(t => [t.uuid || t.id, t]));
-          
-          cachedTasks.forEach(cachedTask => {
-            const key = cachedTask.uuid || cachedTask.id;
-            const serverTask = serverMap.get(key);
-            
-            if (serverTask) {
-              // 両方にある場合はマージ（情報量が多い方を採用）
-              const merged = mergeTasks(serverTask, cachedTask);
-              serverMap.set(key, merged);
-            } else {
-              // 手元にしかない場合は追加するが、削除済みのタスクは復活させない
-              if (!cachedTask.isSoftDeleted) {
-                serverMap.set(key, cachedTask);
-                console.log("[Recovery] Found data only in cache, restoring:", cachedTask.title);
-              }
-            }
-          });
-          finalTasks = Array.from(serverMap.values());
-        } catch (e) {
-          console.error("Cache parse error during load", e);
-        }
-      }
-
-      // 3. 状態を更新
-      setTasks(finalTasks);
-
-      // 4. マージの結果、サーバーに送るべき「より新しい・多いデータ」があれば保存キューに入れる
-      // (ここでは簡易的に、キャッシュから復帰した可能性のある全ての変更を再保存の対象にする)
-      if (finalTasks.length > 0) {
-        // すぐに保存を走らせず、デバウンスの仕組みに任せる
-        finalTasks.forEach(t => {
-          // fetch直後のデータと不整合がないか確認が必要な場合 here
-        });
-      }
-
+      setTasks(fetched.tasks);
       if (fetched.projectConcept) {
         setProjectConcept(fetched.projectConcept);
       }
       if (fetched.epics && fetched.epics.length > 0) {
         setEpics(fetched.epics);
       } else {
+        // GAS側が空（まだ一度も保存されていない）場合はデフォルト値またはローカル値を使う
         setEpics(prev => prev.length > 0 ? prev : DEFAULT_PROJECTS);
       }
       setIsInitialLoadDone(true);
     } catch (e: any) {
-      setErrorMsg("データの読み込みに失敗しました。");
-      console.error(e);
+      setErrorMsg("スプレッドシートの読み込みに失敗しました。");
     } finally {
       setLoading(false);
     }
@@ -295,10 +275,6 @@ const App: React.FC = () => {
       return () => clearTimeout(timer);
     }
   }, [loadData, settings.userName]);
-
-  useEffect(() => {
-    localStorage.setItem('board_tasks_v3', JSON.stringify(tasks));
-  }, [tasks]);
 
   useEffect(() => {
     localStorage.setItem('board_members_v2', JSON.stringify(members));
@@ -337,7 +313,7 @@ const App: React.FC = () => {
       return;
     }
     if (currentTasks.length === 0) {
-      alert("タスクが0件のため、上書きを中止しました。");
+      setErrorMsg("タスクが0件のため、上書きを中止しました。");
       return;
     }
     if (skipConfirm) {
@@ -348,22 +324,22 @@ const App: React.FC = () => {
   };
 
   const updateTaskAndSave = useCallback((taskId: string, updater: (task: Task) => Task, saveMode: 'immediate' | 'debounced' | 'none' = 'debounced') => {
+    let updatedTaskToSave: Task | null = null;
     setTasks(prev => {
       const taskIndex = prev.findIndex(t => t.id === taskId);
       if (taskIndex === -1) return prev;
 
       const updatedTask = updater(prev[taskIndex]);
-
-      if (saveMode !== 'none') {
-        setTimeout(() => {
-          handleSingleTaskSave(updatedTask, saveMode === 'immediate');
-        }, 0);
-      }
+      updatedTaskToSave = updatedTask;
 
       const nextTasks = [...prev];
       nextTasks[taskIndex] = updatedTask;
       return nextTasks;
     });
+
+    if (saveMode !== 'none' && updatedTaskToSave) {
+      handleSingleTaskSave(updatedTaskToSave, saveMode === 'immediate');
+    }
   }, [handleSingleTaskSave]);
 
   const addTask = (overrides?: Partial<Task>) => {
@@ -461,67 +437,85 @@ const App: React.FC = () => {
   };
 
   const filteredTasks = useMemo(() => {
-    const baseFiltered = tasks.filter(t => {
+    // 1. Initial filter based on search and epic
+    const matchesInitial = tasks.filter(t => {
       if (t.isSoftDeleted) return false;
-      if (searchTerm) {
-        const q = searchTerm.toLowerCase();
-        const progressText = (t.progress || []).map(p => p.content).join(' ');
-        const commentsText = (t.comments || []).map(c => c.content).join(' ');
-        const teamText = (t.team || []).join(' ');
-        const matchesSearch =
-          t.title.toLowerCase().includes(q) ||
-          (t.responsiblePerson || '').toLowerCase().includes(q) ||
-          (t.goal || '').toLowerCase().includes(q) ||
-          (t.department || '').toLowerCase().includes(q) ||
-          (t.project || '').toLowerCase().includes(q) ||
-          (t.reviewer || '').toLowerCase().includes(q) ||
-          teamText.toLowerCase().includes(q) ||
-          progressText.toLowerCase().includes(q) ||
-          commentsText.toLowerCase().includes(q);
-        if (!matchesSearch) return false;
-      }
+      const matchesSearch = t.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        t.responsiblePerson.includes(searchTerm);
       const matchesEpic = epicFilter ? (t.project === epicFilter) : true;
-      return matchesEpic;
+      return matchesSearch && matchesEpic;
     });
 
+    // 2. Ancestor Expansion: If a child matches, we must include its ancestors to maintain hierarchy
+    const expandedSet = new Set<string>();
+    const tasksById = new Map<string, Task>();
+    tasks.forEach(t => tasksById.set(t.id, t));
+    tasks.forEach(t => { if (t.uuid) tasksById.set(t.uuid, t); });
+
+    const addAncestors = (task: Task) => {
+      if (expandedSet.has(task.id)) return;
+      expandedSet.add(task.id);
+      if (task.parentId) {
+        const parent = tasksById.get(task.parentId.trim());
+        if (parent) addAncestors(parent);
+      }
+    };
+
+    matchesInitial.forEach(t => addAncestors(t));
+
+    const baseFiltered = tasks.filter(t => expandedSet.has(t.id));
+
+    // 3. Build Hierarchy
     const roots = baseFiltered.filter(t => {
       const pId = t.parentId?.trim();
       return !pId || !baseFiltered.find(p => (p.uuid === pId || p.id === pId));
     });
-    const result: (Task & { depth: number })[] = [];
+
+    const result: (Task & { depth: number; isLastChild?: boolean })[] = [];
     const visited = new Set<string>();
+
+    const sortTasks = (taskList: Task[]) => {
+      return [...taskList].sort((a, b) => {
+        // Completed tasks at the bottom
+        if (a.status === TaskStatus.COMPLETED && b.status !== TaskStatus.COMPLETED) return 1;
+        if (a.status !== TaskStatus.COMPLETED && b.status === TaskStatus.COMPLETED) return -1;
+        
+        // Then by date
+        const dateA = new Date(a.startDate || a.date).getTime();
+        const dateB = new Date(b.startDate || b.date).getTime();
+        if (dateA !== dateB) return dateA - dateB;
+
+        // Finally by title
+        return a.title.localeCompare(b.title);
+      });
+    };
 
     const addWithChildren = (parent: Task, depth = 0) => {
       if (depth > 10) return;
 
-      const children = baseFiltered.filter(t => t.parentId?.trim() === parent.uuid || t.parentId?.trim() === parent.id);
-      children.sort((a, b) => (a.status === TaskStatus.COMPLETED ? 1 : -1));
+      const children = baseFiltered.filter(t => {
+        const pId = t.parentId?.trim();
+        if (!pId) return false;
+        return pId === parent.uuid || pId === parent.id;
+      });
+      
+      const sortedChildren = sortTasks(children);
 
-      children.forEach(child => {
+      sortedChildren.forEach((child, index) => {
         if (visited.has(child.id)) return;
         visited.add(child.id);
-        result.push({ ...child, depth });
+        result.push({ ...child, depth, isLastChild: index === sortedChildren.length - 1 });
         addWithChildren(child, depth + 1);
       });
     };
 
-    roots.sort((a, b) => (a.status === TaskStatus.COMPLETED ? 1 : -1));
+    const sortedRoots = sortTasks(roots);
 
-    roots.forEach(root => {
+    sortedRoots.forEach((root, index) => {
       if (visited.has(root.id)) return;
       visited.add(root.id);
-      result.push({ ...root, depth: 0 });
+      result.push({ ...root, depth: 0, isLastChild: index === sortedRoots.length - 1 });
       addWithChildren(root, 1);
-
-      // 同じtrackIdを持つ兄弟タスク（親なし）を直後にまとめて表示
-      if (root.trackId) {
-        roots.forEach(sibling => {
-          if (visited.has(sibling.id) || sibling.trackId !== root.trackId) return;
-          visited.add(sibling.id);
-          result.push({ ...sibling, depth: 0 });
-          addWithChildren(sibling, 1);
-        });
-      }
     });
 
     return result;
@@ -551,9 +545,13 @@ const App: React.FC = () => {
     setIsAiAnalyzing(true);
     try {
       const result = await analyzeProgress(tasks);
-      alert(result);
+      setMessageModal({
+        show: true,
+        title: 'AI分析結果',
+        message: result
+      });
     } catch (e) {
-      alert('AI分析に失敗しました。');
+      setErrorMsg('AI分析に失敗しました。');
     } finally {
       setIsAiAnalyzing(false);
     }
@@ -572,12 +570,12 @@ const App: React.FC = () => {
       const password = passwordInput.value.trim();
 
       if (!name) {
-        alert('名前を選択または入力してください。');
+        setErrorMsg('名前を選択または入力してください。');
         return;
       }
 
       if (!password) {
-        alert('パスワードを入力してください。');
+        setErrorMsg('パスワードを入力してください。');
         return;
       }
 
@@ -598,7 +596,7 @@ const App: React.FC = () => {
             gasUrl: localStorage.getItem('board_gas_url') || DEFAULT_GAS_URL
           });
         } else {
-          alert('パスワードが正しくありません。');
+          setErrorMsg('パスワードが正しくありません。');
         }
       }
     };
@@ -771,27 +769,11 @@ const App: React.FC = () => {
           onTotalClick={() => setEpicFilter(null)}
         />
 
-        {viewMode === 'list' && (
-          <ActivityFeed
-            tasks={tasks}
-            onTaskClick={(taskId) => {
-              setViewMode('list');
-              setSearchTerm('');
-              setEpicFilter(null);
-              setExpandedTaskId(taskId);
-              setInitialTaskTab('basic');
-              setTimeout(() => {
-                document.getElementById(taskId)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-              }, 100);
-            }}
-          />
-        )}
-
         <div className="mb-6 relative max-w-md">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
           <input
             type="text"
-            placeholder="タスク全文検索（タイトル・担当・進捗・コメント・ゴール...）"
+            placeholder="タスク検索..."
             className="w-full pl-10 pr-4 py-4 bg-white border border-slate-200 rounded-2xl font-bold text-sm outline-none focus:border-red-500 shadow-sm"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
@@ -812,6 +794,7 @@ const App: React.FC = () => {
                     key={task.id}
                     task={task}
                     depth={(task as any).depth}
+                    isLastChild={(task as any).isLastChild}
                     isInitiallyExpanded={expandedTaskId === task.id}
                     initialTab={expandedTaskId === task.id ? initialTaskTab : 'basic'}
                     autoEditTitle={editingTaskId === task.id}
@@ -851,6 +834,21 @@ const App: React.FC = () => {
                     members={members}
                     epics={epics}
                     allTasks={tasks}
+                    onShowConfirm={(title, msg, onConfirm) => {
+                      setShowCleanupConfirm({
+                        show: true,
+                        title,
+                        message: msg,
+                        onConfirm
+                      });
+                    }}
+                    onShowMessage={(title, msg) => {
+                      setMessageModal({
+                        show: true,
+                        title,
+                        message: msg
+                      });
+                    }}
                   />
                 ))
               )}
@@ -867,7 +865,23 @@ const App: React.FC = () => {
                   onAddTask={(date) => addTask({ startDate: date, dueDate: date })}
                   currentUserName={settings.userName}
                   isAdmin={isAdmin}
+                  onMarkAsViewed={markTaskAsViewed}
                   onEditTaskFromTimeline={(taskId) => setTimelineSelectedTaskId(taskId)}
+                  onShowConfirm={(title, msg, onConfirm) => {
+                    setShowCleanupConfirm({
+                      show: true,
+                      title,
+                      message: msg,
+                      onConfirm
+                    });
+                  }}
+                  onShowMessage={(title, msg) => {
+                    setMessageModal({
+                      show: true,
+                      title,
+                      message: msg
+                    });
+                  }}
                 />
               )}
 
@@ -929,13 +943,69 @@ const App: React.FC = () => {
                         <label className="text-[10px] font-black text-slate-500 uppercase">GASコード ({APP_VERSION})</label>
                         <button onClick={() => {
                           navigator.clipboard.writeText(GAS_CODE);
-                          alert('GASコードをコピーしました。GASエディタに貼り付けて新しいデプロイを作成してください。');
+                          setMessageModal({
+                            show: true,
+                            title: 'コピー完了',
+                            message: 'GASコードをコピーしました。GASエディタに貼り付けて新しいデプロイを作成してください。'
+                          });
                         }} className="text-[10px] font-black bg-slate-900 text-white px-3 py-1.5 rounded-lg hover:bg-slate-800 transition-all">コピー</button>
                       </div>
                       <pre className="w-full p-4 bg-slate-900 text-slate-100 rounded-xl text-[10px] font-mono overflow-x-auto h-64">
                         {GAS_CODE}
                       </pre>
                     </div>
+
+                    {isAdmin && (
+                      <div className="pt-6 border-t border-slate-100">
+                        <div className="flex flex-col gap-3">
+                          <label className="text-[10px] font-black text-slate-500 uppercase flex items-center gap-2">
+                            <Trash className="w-3 h-3 text-red-500" /> スプレッドシートの掃除
+                          </label>
+                          <p className="text-[10px] text-slate-400 font-medium leading-relaxed">
+                            削除済み(SOFT_DELETE)の行を物理的に削除し、重複したタスクを整理します。<br />
+                            ※この操作は元に戻せません。実行前にバックアップを推奨します。
+                          </p>
+                          <button
+                            onClick={async () => {
+                              console.log("[Cleanup] Button clicked. GAS URL:", settings.gasUrl);
+                              if (!settings.gasUrl) {
+                                setErrorMsg('GAS URLが設定されていません。');
+                                return;
+                              }
+                              setShowCleanupConfirm({
+                                show: true,
+                                title: 'スプレッドシートの掃除',
+                                message: 'スプレッドシート上の削除済みタスクと重複タスクを完全に削除します。この操作は元に戻せません。よろしいですか？',
+                                onConfirm: async () => {
+                                  try {
+                                    setLoading(true);
+                                    console.log("[Cleanup] Starting cleanup process...");
+                                    await cleanupSheet(settings.gasUrl);
+                                    console.log("[Cleanup] Request sent successfully.");
+                                    setMessageModal({
+                                      show: true,
+                                      title: '送信完了',
+                                      message: 'スプレッドシートの掃除命令を送信しました。シートの整理には数秒かかる場合があります。完了後、自動的に再読み込みします。'
+                                    });
+                                    setTimeout(() => window.location.reload(), 3000);
+                                  } catch (e: any) {
+                                    console.error("[Cleanup] Error:", e);
+                                    setErrorMsg(`掃除に失敗しました: ${e.message}`);
+                                  } finally {
+                                    setLoading(false);
+                                  }
+                                }
+                              });
+                            }}
+                            disabled={loading}
+                            className="w-fit px-6 py-3 bg-red-50 text-red-600 rounded-xl font-black text-xs hover:bg-red-100 transition-all flex items-center gap-2 disabled:opacity-50"
+                          >
+                            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash className="w-4 h-4" />}
+                            掃除を実行する
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
                 {settingsTab === 'concept' && (
@@ -947,7 +1017,11 @@ const App: React.FC = () => {
                     <button onClick={async () => {
                       await saveProjectConceptToSheet(projectConcept, settings.gasUrl);
                       localStorage.setItem('board_project_concept', JSON.stringify(projectConcept));
-                      alert('保存しました');
+                      setMessageModal({
+                        show: true,
+                        title: '保存完了',
+                        message: 'プロジェクトコンセプトをスプレッドシートに保存しました。'
+                      });
                     }} className="w-full py-3 bg-slate-900 text-white rounded-xl font-black text-xs hover:bg-slate-800 transition-all">コンセプトを保存</button>
                   </div>
                 )}
@@ -1017,37 +1091,23 @@ const App: React.FC = () => {
                           <div className="grid grid-cols-2 gap-4">
                             <div>
                               <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">難易度 (1-100)</label>
-                              <input
-                                type="number"
-                                className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 outline-none focus:border-red-500"
-                                value={task.evaluation?.difficulty ?? 50}
-                                onChange={e => {
-                                  const val = parseInt(e.target.value) || 50;
-                                  const currentEval = task.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
-                                  updateTaskAndSave(task.id, t => ({ ...t, evaluation: { ...currentEval, difficulty: val } }), 'immediate');
-                                }}
-                              />
+                              <input type="number" className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 outline-none focus:border-red-500" value={task.evaluation?.difficulty || 50} onChange={e => {
+                                const val = parseInt(e.target.value);
+                                const currentEval = task.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
+                                saveSingleTaskToSheet({ ...task, evaluation: { ...currentEval, difficulty: val } }, settings.gasUrl);
+                              }} />
                             </div>
                             <div>
                               <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">成果 (1-5)</label>
-                              <div className="flex gap-1 mt-1">
-                                {[1, 2, 3, 4, 5].map(r => (
-                                  <button
-                                    key={r}
-                                    onClick={() => {
-                                      const currentEval = task.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
-                                      updateTaskAndSave(task.id, t => ({ ...t, evaluation: { ...currentEval, outcome: r as 1|2|3|4|5 } }), 'immediate');
-                                    }}
-                                    className={`flex-1 py-1.5 rounded-lg text-[10px] font-black transition-all ${task.evaluation?.outcome === r ? 'bg-amber-500 text-white' : 'bg-white border border-slate-200 text-slate-500 hover:bg-amber-50'}`}
-                                  >
-                                    {r}
-                                  </button>
-                                ))}
-                              </div>
+                              <input type="number" min="1" max="5" className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 outline-none focus:border-red-500" value={task.evaluation?.outcome || 3} onChange={e => {
+                                const val = parseInt(e.target.value) as 1 | 2 | 3 | 4 | 5;
+                                const currentEval = task.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
+                                saveSingleTaskToSheet({ ...task, evaluation: { ...currentEval, outcome: val } }, settings.gasUrl);
+                              }} />
                             </div>
                           </div>
                           <div>
-                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">メンバー別貢献度 (1-5)</label>
+                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">メンバー別評価</label>
                             <div className="space-y-2">
                               {members.filter(m => task.team?.includes(m.name)).map(m => {
                                 const evalData = task.evaluation?.memberEvaluations?.find(me => me.memberId === m.name);
@@ -1056,21 +1116,17 @@ const App: React.FC = () => {
                                     <span className="text-xs font-bold text-slate-700">{m.name}</span>
                                     <div className="flex gap-1">
                                       {[1, 2, 3, 4, 5].map(r => (
-                                        <button
-                                          key={r}
-                                          onClick={() => {
-                                            const currentEval = task.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
-                                            const existing = currentEval.memberEvaluations.findIndex(me => me.memberId === m.name);
-                                            const newMemberEvals = [...currentEval.memberEvaluations];
-                                            if (existing >= 0) {
-                                              newMemberEvals[existing] = { ...newMemberEvals[existing], rating: r as 1|2|3|4|5 };
-                                            } else {
-                                              newMemberEvals.push({ memberId: m.name, rating: r as 1|2|3|4|5 });
-                                            }
-                                            updateTaskAndSave(task.id, t => ({ ...t, evaluation: { ...currentEval, memberEvaluations: newMemberEvals } }), 'immediate');
-                                          }}
-                                          className={`w-7 h-7 rounded-lg flex items-center justify-center text-[10px] font-bold transition-all ${evalData?.rating === r ? 'bg-red-600 text-white shadow-md' : 'bg-white border border-slate-200 text-slate-500 hover:bg-red-50 hover:border-red-300'}`}
-                                        >
+                                        <button key={r} onClick={() => {
+                                          const currentEval = task.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
+                                          const existingIndex = currentEval.memberEvaluations.findIndex(me => me.memberId === m.name);
+                                          let newMemberEvals = [...currentEval.memberEvaluations];
+                                          if (existingIndex >= 0) {
+                                            newMemberEvals[existingIndex] = { ...newMemberEvals[existingIndex], rating: r as any };
+                                          } else {
+                                            newMemberEvals.push({ memberId: m.name, rating: r as any });
+                                          }
+                                          saveSingleTaskToSheet({ ...task, evaluation: { ...currentEval, memberEvaluations: newMemberEvals } }, settings.gasUrl);
+                                        }} className={`w-7 h-7 rounded-lg flex items-center justify-center text-[10px] font-bold transition-all ${evalData?.rating === r ? 'bg-red-600 text-white' : 'bg-white border border-slate-200 text-slate-500 hover:bg-red-50'}`}>
                                           {r}
                                         </button>
                                       ))}
@@ -1079,7 +1135,7 @@ const App: React.FC = () => {
                                 );
                               })}
                               {(!task.team || task.team.length === 0) && (
-                                <p className="text-xs font-bold text-slate-400 italic">チームメンバーが設定されていません（タスクのチーム欄に追加してください）</p>
+                                <p className="text-xs font-bold text-slate-400 italic">チームメンバーが設定されていません</p>
                               )}
                             </div>
                           </div>
@@ -1198,11 +1254,80 @@ const App: React.FC = () => {
                   members={members}
                   epics={epics}
                   allTasks={tasks}
+                  onShowConfirm={(title, msg, onConfirm) => {
+                    setShowCleanupConfirm({
+                      show: true,
+                      title,
+                      message: msg,
+                      onConfirm
+                    });
+                  }}
+                  onShowMessage={(title, msg) => {
+                    setMessageModal({
+                      show: true,
+                      title,
+                      message: msg
+                    });
+                  }}
                 />
               </div>
             </div>
           );
         })()}
+        {showCleanupConfirm && (
+          <div className="fixed inset-0 z-[400] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-4">
+            <div className="bg-white rounded-[2.5rem] w-full max-w-md shadow-2xl overflow-hidden p-8 animate-in zoom-in duration-200">
+              <div className="flex flex-col items-center text-center gap-4">
+                <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center">
+                  <Trash className="w-8 h-8 text-red-600" />
+                </div>
+                <h2 className="font-black text-xl">{showCleanupConfirm.title}</h2>
+                <p className="text-sm text-slate-500 font-medium leading-relaxed">
+                  {showCleanupConfirm.message}
+                </p>
+                <div className="flex gap-3 w-full mt-4">
+                  <button
+                    onClick={() => setShowCleanupConfirm(null)}
+                    className="flex-1 py-4 bg-slate-100 text-slate-600 rounded-2xl font-black text-sm hover:bg-slate-200 transition-all"
+                  >
+                    キャンセル
+                  </button>
+                  <button
+                    onClick={() => {
+                      showCleanupConfirm.onConfirm();
+                      setShowCleanupConfirm(null);
+                    }}
+                    className="flex-1 py-4 bg-red-600 text-white rounded-2xl font-black text-sm hover:bg-red-700 shadow-lg shadow-red-200 transition-all"
+                  >
+                    実行する
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {messageModal && (
+          <div className="fixed inset-0 z-[500] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-4">
+            <div className="bg-white rounded-[2.5rem] w-full max-w-md shadow-2xl overflow-hidden p-8 animate-in zoom-in duration-200">
+              <div className="flex flex-col items-center text-center gap-4">
+                <div className="w-16 h-16 bg-emerald-50 rounded-full flex items-center justify-center">
+                  <CheckCircle2 className="w-8 h-8 text-emerald-600" />
+                </div>
+                <h2 className="font-black text-xl">{messageModal.title}</h2>
+                <p className="text-sm text-slate-500 font-medium leading-relaxed">
+                  {messageModal.message}
+                </p>
+                <button
+                  onClick={() => setMessageModal(null)}
+                  className="w-full mt-4 py-4 bg-slate-900 text-white rounded-2xl font-black text-sm hover:bg-slate-800 transition-all"
+                >
+                  閉じる
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

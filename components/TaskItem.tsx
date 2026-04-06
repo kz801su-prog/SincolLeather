@@ -26,10 +26,13 @@ interface Props {
   onAddSubTask?: (parentId: string) => void;
   onAddSiblingTask?: (predecessorId: string) => void;
   onDeleteTask?: (taskId: string) => void;
+  onShowMessage?: (title: string, message: string) => void;
+  onShowConfirm?: (title: string, message: string, onConfirm: () => void) => void;
   members?: MemberInfo[];
   epics?: string[];
   allTasks?: Task[]; // To show sub-tasks
   depth?: number;
+  isLastChild?: boolean;
 }
 
 export const TaskItem: React.FC<Props> = ({
@@ -51,8 +54,11 @@ export const TaskItem: React.FC<Props> = ({
   onAddSubTask,
   onAddSiblingTask,
   onDeleteTask,
+  onShowMessage,
+  onShowConfirm,
   allTasks = [],
-  depth = 0
+  depth = 0,
+  isLastChild = false
 }) => {
   const [isExpanded, setIsExpanded] = useState(isInitiallyExpanded);
   const [activeTab, setActiveTab] = useState<'basic' | 'chat' | 'files' | 'hierarchy'>(initialTab as any || 'basic');
@@ -111,13 +117,25 @@ export const TaskItem: React.FC<Props> = ({
   const userView = task.lastViewedBy?.find(v => v.userName === currentUserName);
   const lastViewTime = userView ? new Date(userView.timestamp).getTime() : 0;
 
-  const unreadProgress = task.progress?.filter(p => new Date(p.updatedAt).getTime() > lastViewTime && p.author !== currentUserName).length || 0;
-  const unreadComments = task.comments?.filter(c => new Date(c.createdAt).getTime() > lastViewTime && c.author !== currentUserName).length || 0;
-  const totalUnread = unreadProgress + unreadComments;
+  const unreadProgress = task.progress?.filter(p => {
+    const d = new Date(p.updatedAt).getTime();
+    return !isNaN(d) && d > lastViewTime && p.author !== currentUserName;
+  }).length || 0;
+  const unreadComments = task.comments?.filter(c => {
+    const d = new Date(c.createdAt).getTime();
+    return !isNaN(d) && d > lastViewTime && c.author !== currentUserName;
+  }).length || 0;
+  const totalUnread = currentUserName ? unreadProgress + unreadComments : 0;
+
+  const markedAsViewedRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (isExpanded && totalUnread > 0) {
+    if (isExpanded && totalUnread > 0 && markedAsViewedRef.current !== task.id) {
+      markedAsViewedRef.current = task.id;
       onMarkAsViewed(task.id);
+    }
+    if (!isExpanded) {
+      markedAsViewedRef.current = null;
     }
   }, [isExpanded, totalUnread, task.id, onMarkAsViewed]);
 
@@ -159,7 +177,11 @@ export const TaskItem: React.FC<Props> = ({
       await onManualSync(currentTaskToSave);
       setIsExpanded(false);
     } catch (e) {
-      alert('保存に失敗しました');
+      if (onShowMessage) {
+        onShowMessage('エラー', '保存に失敗しました');
+      } else {
+        console.error('保存に失敗しました');
+      }
     } finally {
       setIsSaving(false);
     }
@@ -214,7 +236,11 @@ export const TaskItem: React.FC<Props> = ({
 
       // Limit file size to 2MB for Base64 storage in spreadsheet
       if (file.size > 2 * 1024 * 1024) {
-        alert(`ファイル "${file.name}" は大きすぎます (最大2MB)。大きなファイルはGoogleドライブ等にアップロードしてリンクを貼ってください。`);
+        if (onShowMessage) {
+          onShowMessage('ファイルサイズ制限', `ファイル "${file.name}" は大きすぎます (最大2MB)。大きなファイルはGoogleドライブ等にアップロードしてリンクを貼ってください。`);
+        } else {
+          console.error(`ファイル "${file.name}" は大きすぎます`);
+        }
         continue;
       }
 
@@ -276,7 +302,7 @@ export const TaskItem: React.FC<Props> = ({
   const getEffectiveProject = (t: Task): string => {
     if (t.project && t.project !== '未分類') return t.project;
     if (t.parentId) {
-      const parent = allTasks.find(p => p.uuid === t.parentId || p.id === t.parentId);
+      const parent = allTasks.find(p => p.id === t.parentId);
       if (parent) return getEffectiveProject(parent);
     }
     return t.project || '未分類';
@@ -289,17 +315,23 @@ export const TaskItem: React.FC<Props> = ({
       id={task.id}
       className={`rounded-[2rem] border transition-all ${isExpanded ? 'bg-white border-red-200 shadow-xl mb-6 scale-[1.01]' : 'bg-white border-slate-100 shadow-sm mb-3 hover:border-slate-300'} ${isNew ? 'new-task-highlight' : ''} ${task.parentId ? 'border-l-4 border-l-emerald-400' : ''}`}
       style={{
-        marginLeft: depth > 0 ? `${depth * 2.5}rem` : undefined,
+        marginLeft: depth > 0 ? `${depth * 3}rem` : undefined,
         position: 'relative'
       }}
     >
       {depth > 0 && (
-        <div
-          className="absolute top-0 bottom-0 w-px bg-slate-200"
-          style={{ left: '-1.25rem' }}
-        >
-          <div className="absolute top-1/2 left-0 w-4 h-px bg-slate-200" />
-        </div>
+        <>
+          {/* Vertical line connecting to parent/siblings */}
+          <div
+            className={`absolute ${isLastChild ? 'top-0 h-1/2' : 'top-0 bottom-0'} w-px bg-slate-300`}
+            style={{ left: '-1.5rem' }}
+          />
+          {/* Horizontal line connecting to the task card */}
+          <div
+            className="absolute top-1/2 w-6 h-px bg-slate-300"
+            style={{ left: '-1.5rem' }}
+          />
+        </>
       )}
       <div className="p-5 md:p-6 cursor-pointer flex flex-col md:flex-row items-start md:items-center justify-between gap-4" onClick={() => setIsExpanded(!isExpanded)}>
         <div className="flex items-center space-x-4 flex-1 min-w-0">
@@ -781,8 +813,8 @@ export const TaskItem: React.FC<Props> = ({
                     <List className="w-4 h-4 text-red-600" /> 関連タスク一覧
                   </h4>
                   <div className="space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar pr-2">
-                    {allTasks.filter(t => t.parentId && (t.parentId === task.uuid || t.parentId === task.id)).length > 0 ? (
-                      allTasks.filter(t => t.parentId && (t.parentId === task.uuid || t.parentId === task.id)).map(sub => (
+                    {allTasks.filter(t => t.parentId === task.id).length > 0 ? (
+                      allTasks.filter(t => t.parentId === task.id).map(sub => (
                         <div key={sub.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-100">
                           <div className="flex items-center gap-3 min-w-0">
                             <div className="w-2 h-2 rounded-full bg-red-400" />
@@ -817,8 +849,17 @@ export const TaskItem: React.FC<Props> = ({
             <button
               onClick={() => {
                 console.log("Delete button clicked for task:", task.id);
-                if (window.confirm('このタスクを削除してもよろしいですか？')) {
-                  console.log("Confirmed deletion for task:", task.id);
+                if (onShowConfirm) {
+                  onShowConfirm(
+                    'タスクの削除',
+                    'このタスクを削除してもよろしいですか？',
+                    () => {
+                      console.log("Confirmed deletion for task:", task.id);
+                      onDeleteTask?.(task.id);
+                    }
+                  );
+                } else {
+                  // Fallback if no custom confirm is provided
                   onDeleteTask?.(task.id);
                 }
               }}

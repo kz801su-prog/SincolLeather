@@ -14,6 +14,9 @@ interface Props {
   currentUserName: string;
   isAdmin?: boolean;
   onEditTaskFromTimeline?: (taskId: string) => void;
+  onMarkAsViewed?: (taskId: string) => void;
+  onShowConfirm?: (title: string, message: string, onConfirm: () => void) => void;
+  onShowMessage?: (title: string, message: string) => void;
 }
 
 type ViewMode = '1month' | '3months';
@@ -27,6 +30,7 @@ interface EditModalProps {
   handleTaskUpdateWithDependencies: (task: Task) => void;
   onSoftDeleteTask?: (taskId: string) => void;
   currentUserName: string;
+  onShowConfirm?: (title: string, message: string, onConfirm: () => void) => void;
 }
 
 const QuickStatusButton = ({ status, icon: Icon, label, colorClass, editStatus, setEditStatus }: any) => (
@@ -46,7 +50,8 @@ const EditModal: React.FC<EditModalProps> = ({
   onUpdateTask,
   handleTaskUpdateWithDependencies,
   onSoftDeleteTask,
-  currentUserName
+  currentUserName,
+  onShowConfirm
 }) => {
   const [activeTab, setActiveTab] = useState<'details' | 'chat' | 'files'>('details');
   const [editTitle, setEditTitle] = useState(selectedTask.title);
@@ -235,7 +240,16 @@ const EditModal: React.FC<EditModalProps> = ({
         <div className="mt-6 flex-shrink-0 flex gap-3">
           <button
             onClick={() => {
-              if (window.confirm('このタスクを削除してもよろしいですか？')) {
+              if (onShowConfirm) {
+                onShowConfirm(
+                  'タスクの削除',
+                  'このタスクを削除してもよろしいですか？',
+                  () => {
+                    onSoftDeleteTask?.(selectedTask.id);
+                    setSelectedTask(null);
+                  }
+                );
+              } else {
                 onSoftDeleteTask?.(selectedTask.id);
                 setSelectedTask(null);
               }
@@ -255,7 +269,7 @@ const EditModal: React.FC<EditModalProps> = ({
   );
 };
 
-export const TimelineView: React.FC<Props> = ({ tasks, members, onUpdateTask, onUpdateTasks, onAddTask, onSoftDeleteTask, currentUserName, isAdmin, onEditTaskFromTimeline }) => {
+export const TimelineView: React.FC<Props> = ({ tasks, members, onUpdateTask, onUpdateTasks, onAddTask, onSoftDeleteTask, currentUserName, isAdmin, onEditTaskFromTimeline, onMarkAsViewed, onShowConfirm, onShowMessage }) => {
   const [viewMode, setViewMode] = useState<ViewMode>('1month');
   const [groupMode, setGroupMode] = useState<GroupMode>('project');
   const [baseDate, setBaseDate] = useState(new Date());
@@ -265,10 +279,15 @@ export const TimelineView: React.FC<Props> = ({ tasks, members, onUpdateTask, on
 
   // Dragging state to handle drop target visibility
   const [isDragging, setIsDragging] = useState(false);
+  const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
 
   // Dependency Linking State
   const [isLinking, setIsLinking] = useState(false);
   const [linkStartTask, setLinkStartTask] = useState<string | null>(null);
+
+  // Resizing State
+  const [resizing, setResizing] = useState<{ taskId: string, side: 'left' | 'right' } | null>(null);
+
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -291,7 +310,7 @@ export const TimelineView: React.FC<Props> = ({ tasks, members, onUpdateTask, on
         localStorage.setItem('board_deadline_dates_v2', JSON.stringify(next));
         return next;
       } else {
-        const title = prompt("締切線の名前を入力してください:", "締切");
+        const title = "締切"; // prompt("締切線の名前を入力してください:", "締切");
         if (!title) return prev;
         const next = [...prev, { date: dateStr, label: title }];
         localStorage.setItem('board_deadline_dates_v2', JSON.stringify(next));
@@ -310,34 +329,6 @@ export const TimelineView: React.FC<Props> = ({ tasks, members, onUpdateTask, on
   useLayoutEffect(() => {
     forceUpdate({});
   }, [tasks, viewMode, groupMode, baseDate]);
-
-  // Mouse Move for Link Drawing
-  useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (isLinking && containerRef.current) {
-        const rect = containerRef.current.getBoundingClientRect();
-        setMousePos({
-          x: e.clientX - rect.left + containerRef.current.scrollLeft,
-          y: e.clientY - rect.top
-        });
-      }
-    };
-    const handleMouseUp = () => {
-      if (isLinking) {
-        setIsLinking(false);
-        setLinkStartTask(null);
-      }
-    };
-
-    if (isLinking) {
-      window.addEventListener('mousemove', handleMouseMove);
-      window.addEventListener('mouseup', handleMouseUp);
-    }
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, [isLinking]);
 
   const handlePrevPeriod = () => {
     const newDate = new Date(baseDate);
@@ -417,8 +408,80 @@ export const TimelineView: React.FC<Props> = ({ tasks, members, onUpdateTask, on
       });
     }
 
+    // Sort tracks hierarchically within each swimlane
+    Object.keys(groups).forEach(swimlane => {
+      const swimlaneTasks = Object.values(groups[swimlane]).flat();
+      const swimlaneTasksById = new Map<string, Task>();
+      swimlaneTasks.forEach(t => swimlaneTasksById.set(t.id, t));
+      swimlaneTasks.forEach(t => { if (t.uuid) swimlaneTasksById.set(t.uuid, t); });
+
+      const roots = swimlaneTasks.filter(t => {
+        const pId = t.parentId?.trim();
+        return !pId || !swimlaneTasksById.has(pId);
+      });
+
+      const sortedTrackIds: string[] = [];
+      const visited = new Set<string>();
+      const taskToDepth = new Map<string, number>();
+
+      const sortTasks = (taskList: Task[]) => {
+        return [...taskList].sort((a, b) => {
+          if (a.status === TaskStatus.COMPLETED && b.status !== TaskStatus.COMPLETED) return 1;
+          if (a.status !== TaskStatus.COMPLETED && b.status === TaskStatus.COMPLETED) return -1;
+          const dateA = new Date(a.startDate || a.date).getTime();
+          const dateB = new Date(b.startDate || b.date).getTime();
+          if (dateA !== dateB) return dateA - dateB;
+          return a.title.localeCompare(b.title);
+        });
+      };
+
+      const addWithChildren = (parent: Task, depth = 0) => {
+        if (depth > 10) return;
+        const children = swimlaneTasks.filter(t => {
+          const pId = t.parentId?.trim();
+          if (!pId) return false;
+          return pId === parent.uuid || pId === parent.id;
+        });
+        const sortedChildren = sortTasks(children);
+        sortedChildren.forEach(child => {
+          if (visited.has(child.id)) return;
+          visited.add(child.id);
+          taskToDepth.set(child.id, depth);
+          const trackId = child.trackId || `track-${child.id}`;
+          if (!sortedTrackIds.includes(trackId)) sortedTrackIds.push(trackId);
+          addWithChildren(child, depth + 1);
+        });
+      };
+
+      const sortedRoots = sortTasks(roots);
+      sortedRoots.forEach(root => {
+        if (visited.has(root.id)) return;
+        visited.add(root.id);
+        taskToDepth.set(root.id, 0);
+        const trackId = root.trackId || `track-${root.id}`;
+        if (!sortedTrackIds.includes(trackId)) sortedTrackIds.push(trackId);
+        addWithChildren(root, 1);
+      });
+
+      // Rebuild the tracks object with sorted keys
+      const sortedTracks: Record<string, Task[]> = {};
+      sortedTrackIds.forEach(tid => {
+        if (groups[swimlane][tid]) {
+          sortedTracks[tid] = groups[swimlane][tid].map(t => ({
+            ...t,
+            depth: taskToDepth.get(t.id) || 0
+          } as any));
+        }
+      });
+      // Add any remaining tracks that might have been missed
+      Object.keys(groups[swimlane]).forEach(tid => {
+        if (!sortedTracks[tid]) sortedTracks[tid] = groups[swimlane][tid];
+      });
+      groups[swimlane] = sortedTracks;
+    });
+
     return groups;
-  }, [tasks, groupMode, tasksById]);
+  }, [tasks, groupMode, tasksById, members]);
 
   // --- Critical Path Logic ---
   const criticalPathTasks = useMemo(() => {
@@ -480,8 +543,27 @@ export const TimelineView: React.FC<Props> = ({ tasks, members, onUpdateTask, on
 
   // Purely Calculate Position for Task Bar (No DOM dependency)
   const getTaskPosition = (task: Task) => {
-    const taskStart = task.startDate ? new Date(task.startDate) : new Date(task.date);
-    const taskEnd = task.dueDate ? new Date(task.dueDate) : new Date(taskStart.getTime() + (86400000 * 30));
+    let taskStart = task.startDate ? new Date(task.startDate) : new Date(task.date);
+    let taskEnd = task.dueDate ? new Date(task.dueDate) : new Date(taskStart.getTime() + (86400000 * 30));
+
+    // Real-time feedback for resizing
+    if (resizing && resizing.taskId === task.id && containerRef.current) {
+      const totalWidth = containerRef.current.scrollWidth - 224;
+      const relativeX = mousePos.x - 224;
+      const pct = relativeX / totalWidth;
+      const dateIndex = Math.floor(pct * totalDays);
+
+      if (dateIndex >= 0 && dateIndex < dates.length) {
+        const newDate = dates[dateIndex];
+        if (resizing.side === 'left') {
+          taskStart = newDate;
+          if (taskEnd < taskStart) taskEnd = taskStart;
+        } else {
+          taskEnd = newDate;
+          if (taskStart > taskEnd) taskStart = taskEnd;
+        }
+      }
+    }
 
     if (taskEnd < startDate || taskStart > endDate) return null;
 
@@ -548,11 +630,13 @@ export const TimelineView: React.FC<Props> = ({ tasks, members, onUpdateTask, on
   const handleDragStart = (e: React.DragEvent, task: Task) => {
     e.dataTransfer.setData('taskId', task.id);
     e.dataTransfer.effectAllowed = 'move';
+    setDraggedTaskId(task.id);
     setTimeout(() => setIsDragging(true), 0);
   };
 
   const handleDragEnd = () => {
     setIsDragging(false);
+    setDraggedTaskId(null);
   };
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -563,7 +647,8 @@ export const TimelineView: React.FC<Props> = ({ tasks, members, onUpdateTask, on
   const handleDrop = (e: React.DragEvent, dateIndex: number) => {
     e.preventDefault();
     setIsDragging(false);
-    const taskId = e.dataTransfer.getData('taskId');
+    const taskId = e.dataTransfer.getData('taskId') || draggedTaskId;
+    setDraggedTaskId(null);
     const droppedTask = tasks.find(t => t.id === taskId);
 
     if (droppedTask && dateIndex >= 0 && dateIndex < dates.length) {
@@ -668,6 +753,64 @@ export const TimelineView: React.FC<Props> = ({ tasks, members, onUpdateTask, on
       onUpdateTask(updatedTask);
     }
   };
+
+  // Mouse Move for Link Drawing and Resizing
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if ((isLinking || resizing) && containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        const x = e.clientX - rect.left + containerRef.current.scrollLeft;
+        const y = e.clientY - rect.top;
+        setMousePos({ x, y });
+      }
+    };
+    const handleMouseUp = () => {
+      if (isLinking) {
+        setIsLinking(false);
+        setLinkStartTask(null);
+      }
+      if (resizing) {
+        // Final update
+        const task = tasks.find(t => t.id === resizing.taskId);
+        if (task && containerRef.current) {
+          const rect = containerRef.current.getBoundingClientRect();
+          const x = mousePos.x;
+          const totalWidth = containerRef.current.scrollWidth - 224;
+          const relativeX = x - 224;
+          const pct = relativeX / totalWidth;
+          const dateIndex = Math.floor(pct * totalDays);
+
+          if (dateIndex >= 0 && dateIndex < dates.length) {
+            const newDate = dates[dateIndex].toISOString().split('T')[0];
+            let updatedTask = { ...task };
+            if (resizing.side === 'left') {
+              updatedTask.startDate = newDate;
+              if (task.dueDate && new Date(newDate) > new Date(task.dueDate)) {
+                updatedTask.dueDate = newDate;
+              }
+            } else {
+              updatedTask.dueDate = newDate;
+              const start = task.startDate || task.date;
+              if (new Date(newDate) < new Date(start)) {
+                updatedTask.startDate = newDate;
+              }
+            }
+            handleTaskUpdateWithDependencies(updatedTask);
+          }
+        }
+        setResizing(null);
+      }
+    };
+
+    if (isLinking || resizing) {
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+    }
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isLinking, resizing, dates, totalDays, tasks, handleTaskUpdateWithDependencies, mousePos.x]);
 
   const handleCellClick = (dateIndex: number) => {
     if (dateIndex >= 0 && dateIndex < dates.length) {
@@ -822,7 +965,7 @@ export const TimelineView: React.FC<Props> = ({ tasks, members, onUpdateTask, on
             </svg>
 
             {/* Grid Lines & Drop Targets */}
-            <div className="absolute inset-0 flex pointer-events-none">
+            <div className={`absolute inset-0 flex pointer-events-none ${isDragging ? 'z-50' : 'z-0'}`}>
               <div className="w-56 flex-shrink-0 border-r border-slate-100 bg-white sticky left-0 z-10" />
               <div className="flex-1 relative pointer-events-auto">
                 {dates.map((d, i) => (
@@ -869,7 +1012,7 @@ export const TimelineView: React.FC<Props> = ({ tasks, members, onUpdateTask, on
               if (allGroupTasks.length === 0 && groupName === 'その他/未割当') return null;
 
               return (
-                <div key={groupName} className="border-b border-slate-100 relative pointer-events-none group/lane hover:bg-slate-50/50 transition-colors">
+                <div key={groupName} className={`border-b border-slate-100 relative group/lane hover:bg-slate-50/50 transition-colors ${isDragging ? 'pointer-events-none' : 'pointer-events-auto'}`}>
                   <div className="flex min-h-[72px]">
                     <div className="w-56 flex-shrink-0 p-4 flex flex-col justify-center border-r border-slate-100 bg-white sticky left-0 z-20 shadow-[4px_0_12px_rgba(0,0,0,0.02)] pointer-events-auto">
                       <div className="flex items-center space-x-3">
@@ -883,12 +1026,12 @@ export const TimelineView: React.FC<Props> = ({ tasks, members, onUpdateTask, on
                       </div>
                     </div>
 
-                    <div className="flex-1 relative py-3">
+                    <div className="flex-1 relative py-3 pointer-events-none">
                       {allGroupTasks.length === 0 ? (
                         <div className="absolute inset-0 flex items-center justify-center text-[10px] text-slate-300 font-bold italic">No active tasks</div>
                       ) : (
                         Object.entries(tracks).map(([trackId, trackTasks]) => (
-                          <div key={trackId} className="h-12 relative my-1 group pointer-events-auto">
+                          <div key={trackId} className="h-12 relative my-1 group pointer-events-none">
                             {trackTasks.map((task) => {
                               const style = getTaskPosition(task);
                               if (!style) return null;
@@ -897,19 +1040,53 @@ export const TimelineView: React.FC<Props> = ({ tasks, members, onUpdateTask, on
                                 <div
                                   key={task.id}
                                   id={`task-bar-${task.id}`}
-                                  className={`absolute h-8 top-2 rounded-lg shadow-sm cursor-grab active:cursor-grabbing hover:scale-[1.01] hover:shadow-md transition-all flex items-center px-3 overflow-hidden ${getStatusColor(task)} ${isDragging ? 'pointer-events-none' : ''}`}
+                                  className={`absolute h-8 top-2 rounded-lg shadow-sm cursor-grab active:cursor-grabbing hover:scale-[1.01] hover:shadow-md transition-all flex items-center px-3 overflow-hidden ${getStatusColor(task)} ${isDragging ? 'pointer-events-none' : 'pointer-events-auto'}`}
                                   style={{ left: style.left, width: style.width }}
-                                  draggable={!task.isSoftDeleted}
+                                  draggable={!task.isSoftDeleted && !resizing}
                                   onDragStart={(e) => handleDragStart(e, task)}
                                   onDragEnd={handleDragEnd}
-                                  onClick={() => onEditTaskFromTimeline && onEditTaskFromTimeline(task.id)}
+                                  onClick={() => {
+                                    if (onEditTaskFromTimeline) {
+                                      onEditTaskFromTimeline(task.id);
+                                      onMarkAsViewed?.(task.id);
+                                    }
+                                  }}
                                   onContextMenu={(e) => handleContextMenu(e, task)}
                                   onMouseUp={(e) => completeLink(e, task.id)}
                                 >
+                                  {/* Resize Handles */}
+                                  {!task.isSoftDeleted && (
+                                    <>
+                                      <div
+                                        className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-white/30 z-30"
+                                        onMouseDown={(e) => {
+                                          e.stopPropagation();
+                                          setResizing({ taskId: task.id, side: 'left' });
+                                        }}
+                                      />
+                                      <div
+                                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-white/30 z-30"
+                                        onMouseDown={(e) => {
+                                          e.stopPropagation();
+                                          setResizing({ taskId: task.id, side: 'right' });
+                                        }}
+                                      />
+                                    </>
+                                  )}
                                   {task.isSoftDeleted && <div className="absolute inset-0 bg-white/40 backdrop-blur-[1px]" />}
                                   <span className={`relative text-[10px] font-bold truncate drop-shadow-md z-10 flex-1 ${task.isSoftDeleted ? 'line-through text-slate-500' : ''}`}>
-                                    {groupMode === 'project' && <span className="mr-2 opacity-70 font-normal">({task.responsiblePerson})</span>}
-                                    {task.title}
+                                    <span className="flex items-center">
+                                      {(task as any).depth > 0 && (
+                                        <span className="flex-shrink-0 flex items-center opacity-80 mr-2">
+                                          {Array.from({ length: (task as any).depth }).map((_, i) => (
+                                            <span key={i} className="w-4 h-px bg-current mx-0.5 opacity-50" />
+                                          ))}
+                                          <span className="text-[10px] font-black mr-1">└</span>
+                                        </span>
+                                      )}
+                                      {groupMode === 'project' && <span className="mr-2 opacity-70 font-normal">({task.responsiblePerson})</span>}
+                                      {task.title}
+                                    </span>
                                     {(task.comments?.length > 0 || task.attachments?.length > 0) && (
                                       <span className="ml-2 inline-flex items-center gap-1 opacity-70">
                                         {task.comments?.length > 0 && <MessageSquare className="w-3 h-3" />}
