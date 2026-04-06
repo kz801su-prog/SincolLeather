@@ -6,7 +6,7 @@ import {
   FileCode, Copy, Check, Award, Briefcase, Edit2, Bell, Star, TrendingUp, Target, CheckCircle2
 } from 'lucide-react';
 import { Task, TaskStatus, TaskPriority, MemberInfo, TaskComment, ProjectConcept, Attachment } from './types';
-import { fetchTasksFromSheet, syncAllTasksToSheet, saveSingleTaskToSheet, saveProjectConceptToSheet, saveEpicsToSheet } from './googleSheetsService';
+import { fetchTasksFromSheet, syncAllTasksToSheet, saveSingleTaskToSheet, saveProjectConceptToSheet, saveEpicsToSheet, mergeTasks } from './googleSheetsService';
 import { analyzeProgress } from './geminiService';
 import { DashboardCards } from './components/DashboardCards';
 import { TaskItem } from './components/TaskItem';
@@ -14,6 +14,7 @@ import { TimelineView } from './components/TimelineView';
 import { MatrixView } from './components/MatrixView';
 import { EvaluationView } from './components/EvaluationView';
 import { EpicListView } from './components/EpicListView';
+import { ActivityFeed } from './components/ActivityFeed';
 import { DEFAULT_GAS_URL, INITIAL_TASKS, DEFAULT_CLIQ_URL, MEMBERS as INITIAL_MEMBERS, ADMIN_USER_NAME, SHEET_GID, DEFAULT_PROJECTS } from './constants';
 
 import GAS_CODE from './server/Code.js?raw';
@@ -185,6 +186,9 @@ const App: React.FC = () => {
   const markTaskAsViewed = useCallback((taskId: string) => {
     if (!settings.userName) return;
 
+    // state updater の外で保存するためにタスクを一時保持
+    let taskToSave: Task | null = null;
+
     setTasks(prevTasks => {
       const taskIndex = prevTasks.findIndex(t => t.id === taskId);
       if (taskIndex === -1) return prevTasks;
@@ -195,43 +199,89 @@ const App: React.FC = () => {
       const lastViewedBy = [...(task.lastViewedBy || [])];
       const userViewIndex = lastViewedBy.findIndex(v => v.userName === settings.userName);
 
-      let updatedLastViewedBy;
-      if (userViewIndex !== -1) {
-        updatedLastViewedBy = [...lastViewedBy];
-        updatedLastViewedBy[userViewIndex] = { ...lastViewedBy[userViewIndex], timestamp: now };
-      } else {
-        updatedLastViewedBy = [...lastViewedBy, { userId: settings.userName, userName: settings.userName, timestamp: now }];
-      }
+      const updatedLastViewedBy = userViewIndex !== -1
+        ? lastViewedBy.map((v, i) => i === userViewIndex ? { ...v, timestamp: now } : v)
+        : [...lastViewedBy, { userId: settings.userName, userName: settings.userName, timestamp: now }];
 
       const updatedTask = { ...task, lastViewedBy: updatedLastViewedBy };
-
-      // ★ markTaskAsViewedではGAS保存をしない（不要な2重保存を防止）
-      // 既読情報はローカル状態のみ更新し、次の明示的な保存時にまとめて送信される
+      taskToSave = updatedTask;
 
       const nextTasks = [...prevTasks];
       nextTasks[taskIndex] = updatedTask;
       return nextTasks;
     });
+
+    // 既読状態をGASに保存（state updater の外で実行 - Reactアンチパターン回避）
+    // デバウンスタイマーとの競合を避けるため setTimeout で非同期に実行
+    setTimeout(() => {
+      if (taskToSave) handleSingleTaskSave(taskToSave, false);
+    }, 0);
   }, [settings.userName, handleSingleTaskSave]);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     setErrorMsg(null);
     try {
+      // 1. まずサーバーから最新データを取得
       const fetched = await fetchTasksFromSheet(settings.gasUrl);
-      setTasks(fetched.tasks);
+      const serverTasks = fetched.tasks;
+
+      // 2. ブラウザのキャッシュ（手元の控え）を取得
+      const cachedStr = localStorage.getItem('board_tasks_v3');
+      let finalTasks = serverTasks;
+
+      if (cachedStr) {
+        try {
+          const cachedTasks: Task[] = JSON.parse(cachedStr);
+          // サーバーのデータと手元のデータを1つずつ見比べてマージ
+          const serverMap = new Map(serverTasks.map(t => [t.uuid || t.id, t]));
+          
+          cachedTasks.forEach(cachedTask => {
+            const key = cachedTask.uuid || cachedTask.id;
+            const serverTask = serverMap.get(key);
+            
+            if (serverTask) {
+              // 両方にある場合はマージ（情報量が多い方を採用）
+              const merged = mergeTasks(serverTask, cachedTask);
+              serverMap.set(key, merged);
+            } else {
+              // 手元にしかない場合は追加するが、削除済みのタスクは復活させない
+              if (!cachedTask.isSoftDeleted) {
+                serverMap.set(key, cachedTask);
+                console.log("[Recovery] Found data only in cache, restoring:", cachedTask.title);
+              }
+            }
+          });
+          finalTasks = Array.from(serverMap.values());
+        } catch (e) {
+          console.error("Cache parse error during load", e);
+        }
+      }
+
+      // 3. 状態を更新
+      setTasks(finalTasks);
+
+      // 4. マージの結果、サーバーに送るべき「より新しい・多いデータ」があれば保存キューに入れる
+      // (ここでは簡易的に、キャッシュから復帰した可能性のある全ての変更を再保存の対象にする)
+      if (finalTasks.length > 0) {
+        // すぐに保存を走らせず、デバウンスの仕組みに任せる
+        finalTasks.forEach(t => {
+          // fetch直後のデータと不整合がないか確認が必要な場合 here
+        });
+      }
+
       if (fetched.projectConcept) {
         setProjectConcept(fetched.projectConcept);
       }
       if (fetched.epics && fetched.epics.length > 0) {
         setEpics(fetched.epics);
       } else {
-        // GAS側が空（まだ一度も保存されていない）場合はデフォルト値またはローカル値を使う
         setEpics(prev => prev.length > 0 ? prev : DEFAULT_PROJECTS);
       }
       setIsInitialLoadDone(true);
     } catch (e: any) {
-      setErrorMsg("スプレッドシートの読み込みに失敗しました。");
+      setErrorMsg("データの読み込みに失敗しました。");
+      console.error(e);
     } finally {
       setLoading(false);
     }
@@ -245,6 +295,10 @@ const App: React.FC = () => {
       return () => clearTimeout(timer);
     }
   }, [loadData, settings.userName]);
+
+  useEffect(() => {
+    localStorage.setItem('board_tasks_v3', JSON.stringify(tasks));
+  }, [tasks]);
 
   useEffect(() => {
     localStorage.setItem('board_members_v2', JSON.stringify(members));
@@ -409,10 +463,25 @@ const App: React.FC = () => {
   const filteredTasks = useMemo(() => {
     const baseFiltered = tasks.filter(t => {
       if (t.isSoftDeleted) return false;
-      const matchesSearch = t.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        t.responsiblePerson.includes(searchTerm);
+      if (searchTerm) {
+        const q = searchTerm.toLowerCase();
+        const progressText = (t.progress || []).map(p => p.content).join(' ');
+        const commentsText = (t.comments || []).map(c => c.content).join(' ');
+        const teamText = (t.team || []).join(' ');
+        const matchesSearch =
+          t.title.toLowerCase().includes(q) ||
+          (t.responsiblePerson || '').toLowerCase().includes(q) ||
+          (t.goal || '').toLowerCase().includes(q) ||
+          (t.department || '').toLowerCase().includes(q) ||
+          (t.project || '').toLowerCase().includes(q) ||
+          (t.reviewer || '').toLowerCase().includes(q) ||
+          teamText.toLowerCase().includes(q) ||
+          progressText.toLowerCase().includes(q) ||
+          commentsText.toLowerCase().includes(q);
+        if (!matchesSearch) return false;
+      }
       const matchesEpic = epicFilter ? (t.project === epicFilter) : true;
-      return matchesSearch && matchesEpic;
+      return matchesEpic;
     });
 
     const roots = baseFiltered.filter(t => {
@@ -443,6 +512,16 @@ const App: React.FC = () => {
       visited.add(root.id);
       result.push({ ...root, depth: 0 });
       addWithChildren(root, 1);
+
+      // 同じtrackIdを持つ兄弟タスク（親なし）を直後にまとめて表示
+      if (root.trackId) {
+        roots.forEach(sibling => {
+          if (visited.has(sibling.id) || sibling.trackId !== root.trackId) return;
+          visited.add(sibling.id);
+          result.push({ ...sibling, depth: 0 });
+          addWithChildren(sibling, 1);
+        });
+      }
     });
 
     return result;
@@ -692,11 +771,27 @@ const App: React.FC = () => {
           onTotalClick={() => setEpicFilter(null)}
         />
 
+        {viewMode === 'list' && (
+          <ActivityFeed
+            tasks={tasks}
+            onTaskClick={(taskId) => {
+              setViewMode('list');
+              setSearchTerm('');
+              setEpicFilter(null);
+              setExpandedTaskId(taskId);
+              setInitialTaskTab('basic');
+              setTimeout(() => {
+                document.getElementById(taskId)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }, 100);
+            }}
+          />
+        )}
+
         <div className="mb-6 relative max-w-md">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
           <input
             type="text"
-            placeholder="タスク検索..."
+            placeholder="タスク全文検索（タイトル・担当・進捗・コメント・ゴール...）"
             className="w-full pl-10 pr-4 py-4 bg-white border border-slate-200 rounded-2xl font-bold text-sm outline-none focus:border-red-500 shadow-sm"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
@@ -922,23 +1017,37 @@ const App: React.FC = () => {
                           <div className="grid grid-cols-2 gap-4">
                             <div>
                               <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">難易度 (1-100)</label>
-                              <input type="number" className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 outline-none focus:border-red-500" value={task.evaluation?.difficulty || 50} onChange={e => {
-                                const val = parseInt(e.target.value);
-                                const currentEval = task.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
-                                saveSingleTaskToSheet({ ...task, evaluation: { ...currentEval, difficulty: val } }, settings.gasUrl);
-                              }} />
+                              <input
+                                type="number"
+                                className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 outline-none focus:border-red-500"
+                                value={task.evaluation?.difficulty ?? 50}
+                                onChange={e => {
+                                  const val = parseInt(e.target.value) || 50;
+                                  const currentEval = task.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
+                                  updateTaskAndSave(task.id, t => ({ ...t, evaluation: { ...currentEval, difficulty: val } }), 'immediate');
+                                }}
+                              />
                             </div>
                             <div>
                               <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">成果 (1-5)</label>
-                              <input type="number" min="1" max="5" className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 outline-none focus:border-red-500" value={task.evaluation?.outcome || 3} onChange={e => {
-                                const val = parseInt(e.target.value) as 1 | 2 | 3 | 4 | 5;
-                                const currentEval = task.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
-                                saveSingleTaskToSheet({ ...task, evaluation: { ...currentEval, outcome: val } }, settings.gasUrl);
-                              }} />
+                              <div className="flex gap-1 mt-1">
+                                {[1, 2, 3, 4, 5].map(r => (
+                                  <button
+                                    key={r}
+                                    onClick={() => {
+                                      const currentEval = task.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
+                                      updateTaskAndSave(task.id, t => ({ ...t, evaluation: { ...currentEval, outcome: r as 1|2|3|4|5 } }), 'immediate');
+                                    }}
+                                    className={`flex-1 py-1.5 rounded-lg text-[10px] font-black transition-all ${task.evaluation?.outcome === r ? 'bg-amber-500 text-white' : 'bg-white border border-slate-200 text-slate-500 hover:bg-amber-50'}`}
+                                  >
+                                    {r}
+                                  </button>
+                                ))}
+                              </div>
                             </div>
                           </div>
                           <div>
-                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">メンバー別評価</label>
+                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">メンバー別貢献度 (1-5)</label>
                             <div className="space-y-2">
                               {members.filter(m => task.team?.includes(m.name)).map(m => {
                                 const evalData = task.evaluation?.memberEvaluations?.find(me => me.memberId === m.name);
@@ -947,17 +1056,21 @@ const App: React.FC = () => {
                                     <span className="text-xs font-bold text-slate-700">{m.name}</span>
                                     <div className="flex gap-1">
                                       {[1, 2, 3, 4, 5].map(r => (
-                                        <button key={r} onClick={() => {
-                                          const currentEval = task.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
-                                          const existingIndex = currentEval.memberEvaluations.findIndex(me => me.memberId === m.name);
-                                          let newMemberEvals = [...currentEval.memberEvaluations];
-                                          if (existingIndex >= 0) {
-                                            newMemberEvals[existingIndex] = { ...newMemberEvals[existingIndex], rating: r as any };
-                                          } else {
-                                            newMemberEvals.push({ memberId: m.name, rating: r as any });
-                                          }
-                                          saveSingleTaskToSheet({ ...task, evaluation: { ...currentEval, memberEvaluations: newMemberEvals } }, settings.gasUrl);
-                                        }} className={`w-7 h-7 rounded-lg flex items-center justify-center text-[10px] font-bold transition-all ${evalData?.rating === r ? 'bg-red-600 text-white' : 'bg-white border border-slate-200 text-slate-500 hover:bg-red-50'}`}>
+                                        <button
+                                          key={r}
+                                          onClick={() => {
+                                            const currentEval = task.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
+                                            const existing = currentEval.memberEvaluations.findIndex(me => me.memberId === m.name);
+                                            const newMemberEvals = [...currentEval.memberEvaluations];
+                                            if (existing >= 0) {
+                                              newMemberEvals[existing] = { ...newMemberEvals[existing], rating: r as 1|2|3|4|5 };
+                                            } else {
+                                              newMemberEvals.push({ memberId: m.name, rating: r as 1|2|3|4|5 });
+                                            }
+                                            updateTaskAndSave(task.id, t => ({ ...t, evaluation: { ...currentEval, memberEvaluations: newMemberEvals } }), 'immediate');
+                                          }}
+                                          className={`w-7 h-7 rounded-lg flex items-center justify-center text-[10px] font-bold transition-all ${evalData?.rating === r ? 'bg-red-600 text-white shadow-md' : 'bg-white border border-slate-200 text-slate-500 hover:bg-red-50 hover:border-red-300'}`}
+                                        >
                                           {r}
                                         </button>
                                       ))}
@@ -966,7 +1079,7 @@ const App: React.FC = () => {
                                 );
                               })}
                               {(!task.team || task.team.length === 0) && (
-                                <p className="text-xs font-bold text-slate-400 italic">チームメンバーが設定されていません</p>
+                                <p className="text-xs font-bold text-slate-400 italic">チームメンバーが設定されていません（タスクのチーム欄に追加してください）</p>
                               )}
                             </div>
                           </div>

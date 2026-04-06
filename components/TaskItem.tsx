@@ -276,7 +276,7 @@ export const TaskItem: React.FC<Props> = ({
   const getEffectiveProject = (t: Task): string => {
     if (t.project && t.project !== '未分類') return t.project;
     if (t.parentId) {
-      const parent = allTasks.find(p => p.id === t.parentId);
+      const parent = allTasks.find(p => p.uuid === t.parentId || p.id === t.parentId);
       if (parent) return getEffectiveProject(parent);
     }
     return t.project || '未分類';
@@ -781,8 +781,8 @@ export const TaskItem: React.FC<Props> = ({
                     <List className="w-4 h-4 text-red-600" /> 関連タスク一覧
                   </h4>
                   <div className="space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar pr-2">
-                    {allTasks.filter(t => t.parentId === task.id).length > 0 ? (
-                      allTasks.filter(t => t.parentId === task.id).map(sub => (
+                    {allTasks.filter(t => t.parentId && (t.parentId === task.uuid || t.parentId === task.id)).length > 0 ? (
+                      allTasks.filter(t => t.parentId && (t.parentId === task.uuid || t.parentId === task.id)).map(sub => (
                         <div key={sub.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-100">
                           <div className="flex items-center gap-3 min-w-0">
                             <div className="w-2 h-2 rounded-full bg-red-400" />

@@ -124,6 +124,77 @@ const mapRowToTask = (rawRow: any[], sheetRowNumber: number): Task | null => {
   } as Task;
 };
 
+/**
+ * 2つのタスクデータをマージする (ユーザー要望: データ量が多い方を優先、ないデータを足す)
+ */
+export const mergeTasks = (taskA: Task, taskB: Task): Task => {
+  // 削除フラグは「どちらかが削除済みなら削除済み」とする（削除が優先）
+  const isSoftDeleted = taskA.isSoftDeleted || taskB.isSoftDeleted || false;
+  // 基本的なフィールドのマージ（空でない方を優先、または文字数が多い方を優先）
+  const pickRich = (valA: any, valB: any) => {
+    if (valA === undefined || valA === null || valA === '') return valB;
+    if (valB === undefined || valB === null || valB === '') return valA;
+    if (typeof valA === 'string' && typeof valB === 'string') {
+      return valA.length >= valB.length ? valA : valB;
+    }
+    return valA;
+  };
+
+  // 配列系データのマージ (IDや内容で重複排除)
+  const mergeArrays = <T>(arrA: T[] | undefined, arrB: T[] | undefined, key: keyof T): T[] => {
+    const combined = [...(arrA || []), ...(arrB || [])];
+    const map = new Map();
+    combined.forEach(item => {
+      const k = item[key];
+      if (!map.has(k)) {
+        map.set(k, item);
+      } else {
+        // 同じIDがある場合、より情報量が多い（プロパティが多い）方を保持する等の工夫も可能だが、
+        // 現状は最初に見つけたものを優先
+      }
+    });
+    return Array.from(map.values());
+  };
+
+  // 進捗(progress)は内容と日付で重複排除
+  const mergeProgress = (pA: any[] = [], pB: any[] = []) => {
+    const combined = [...pA, ...pB];
+    const map = new Map();
+    combined.forEach(p => {
+      const k = `${p.updatedAt}-${p.content}`;
+      if (!map.has(k)) map.set(k, p);
+    });
+    return Array.from(map.values()).sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  };
+
+  // 既読状態(lastViewedBy)はユーザーごとに最新のタイムスタンプを保持
+  const mergeLastViewed = (lvA: any[] = [], lvB: any[] = []) => {
+    const combined = [...lvA, ...lvB];
+    const map = new Map();
+    combined.forEach(v => {
+      if (!map.has(v.userName) || new Date(v.timestamp).getTime() > new Date(map.get(v.userName).timestamp).getTime()) {
+        map.set(v.userName, v);
+      }
+    });
+    return Array.from(map.values());
+  };
+
+  return {
+    ...taskA,
+    ...taskB, // Bで上書きできるものはする
+    isSoftDeleted, // 削除フラグは OR ロジックで明示的に設定
+    title: pickRich(taskA.title, taskB.title),
+    goal: pickRich(taskA.goal, taskB.goal),
+    responsiblePerson: pickRich(taskA.responsiblePerson, taskB.responsiblePerson),
+    status: (taskA.status === TaskStatus.COMPLETED || taskB.status === TaskStatus.COMPLETED) ? TaskStatus.COMPLETED : (taskA.status || taskB.status),
+    progress: mergeProgress(taskA.progress, taskB.progress),
+    comments: mergeArrays(taskA.comments, taskB.comments, 'id'),
+    attachments: mergeArrays(taskA.attachments, taskB.attachments, 'id'),
+    lastViewedBy: mergeLastViewed(taskA.lastViewedBy, taskB.lastViewedBy),
+    evaluation: taskA.evaluation || taskB.evaluation, // 評価がある方を優先
+  };
+};
+
 export const fetchTasksFromSheet = async (gasUrl?: string): Promise<{ tasks: Task[], projectConcept?: ProjectConcept, epics: string[] }> => {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
@@ -169,11 +240,15 @@ export const fetchTasksFromSheet = async (gasUrl?: string): Promise<{ tasks: Tas
       if (task) resultTasks.push(task);
     });
 
-    // Deduplicate by UUID, keeping the latest row
+    // Deduplicate by UUID, merging data instead of just overwriting
     const taskMap = new Map<string, Task>();
     resultTasks.forEach(t => {
-      if (t.uuid) taskMap.set(t.uuid, t);
-      else taskMap.set(t.id, t);
+      const key = t.uuid || t.id;
+      if (taskMap.has(key)) {
+        taskMap.set(key, mergeTasks(taskMap.get(key)!, t));
+      } else {
+        taskMap.set(key, t);
+      }
     });
 
     return { tasks: Array.from(taskMap.values()), epics: [] };
@@ -205,11 +280,15 @@ export const fetchTasksFromSheet = async (gasUrl?: string): Promise<{ tasks: Tas
             if (task) resultTasks.push(task);
           });
 
-          // Deduplicate by UUID, keeping the latest row
+          // Deduplicate by UUID, merging data
           const taskMap = new Map<string, Task>();
           resultTasks.forEach(t => {
-            if (t.uuid) taskMap.set(t.uuid, t);
-            else taskMap.set(t.id, t);
+            const key = t.uuid || t.id;
+            if (taskMap.has(key)) {
+              taskMap.set(key, mergeTasks(taskMap.get(key)!, t));
+            } else {
+              taskMap.set(key, t);
+            }
           });
 
           return { tasks: Array.from(taskMap.values()), projectConcept: result.projectConcept, epics: result.epics || [] };
