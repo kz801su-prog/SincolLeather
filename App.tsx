@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import {
   List, Calendar, Settings, RefreshCw, Plus, Search,
   CloudUpload, BrainCircuit, X, LayoutGrid, Loader2,
-  Armchair, ShieldCheck, Users, Trash2, UserPlus, Lock, CheckCircle, AlertTriangle, LogOut, Link as LinkIcon, Activity,
+  Armchair, ShieldCheck, Users, Trash2, UserPlus, Lock, CheckCircle, AlertTriangle, LogOut, Link as LinkIcon, Activity, History,
   FileCode, Copy, Check, Award, Briefcase, Edit2, Bell, Star, TrendingUp, Target, CheckCircle2, Trash
 } from 'lucide-react';
 import { Task, TaskStatus, TaskPriority, MemberInfo, TaskComment, ProjectConcept, Attachment } from './types';
@@ -14,6 +14,7 @@ import { TimelineView } from './components/TimelineView';
 import { MatrixView } from './components/MatrixView';
 import { EvaluationView } from './components/EvaluationView';
 import { EpicListView } from './components/EpicListView';
+import { ActivityFeed } from './components/ActivityFeed';
 import { DEFAULT_GAS_URL, INITIAL_TASKS, DEFAULT_CLIQ_URL, MEMBERS as INITIAL_MEMBERS, ADMIN_USER_NAME, SHEET_GID, DEFAULT_PROJECTS } from './constants';
 
 import GAS_CODE from './server/Code.js?raw';
@@ -24,7 +25,7 @@ const App: React.FC = () => {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(false);
   const [isInitialLoadDone, setIsInitialLoadDone] = useState(false);
-  const [viewMode, setViewMode] = useState<'list' | 'timeline' | 'matrix' | 'evaluation'>('list');
+  const [viewMode, setViewMode] = useState<'list' | 'timeline' | 'matrix' | 'evaluation' | 'activity'>('list');
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showLogoutModal, setShowLogoutModal] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'general' | 'concept' | 'notifications' | 'members' | 'evaluation' | 'evaluation_tasks' | 'epics'>('general');
@@ -194,7 +195,6 @@ const App: React.FC = () => {
   const markTaskAsViewed = useCallback((taskId: string) => {
     if (!settings.userName) return;
 
-    let updatedTaskToSave: Task | null = null;
     setTasks(prevTasks => {
       const taskIndex = prevTasks.findIndex(t => t.id === taskId);
       if (taskIndex === -1) return prevTasks;
@@ -231,17 +231,15 @@ const App: React.FC = () => {
       }
 
       const updatedTask = { ...task, lastViewedBy: updatedLastViewedBy };
-      updatedTaskToSave = updatedTask;
+      
+      // 保存を実行 (updaterの中で直接呼ぶのではなく、副作用として扱うのが理想だが、
+      // ここでは確実に最新のupdatedTaskを渡すために、handleSingleTaskSaveを呼ぶ)
+      handleSingleTaskSave(updatedTask, true);
 
       const nextTasks = [...prevTasks];
       nextTasks[taskIndex] = updatedTask;
       return nextTasks;
     });
-
-    // updaterの外で保存を実行
-    if (updatedTaskToSave) {
-      handleSingleTaskSave(updatedTaskToSave, true);
-    }
   }, [settings.userName, handleSingleTaskSave]);
 
   const loadData = useCallback(async () => {
@@ -324,22 +322,20 @@ const App: React.FC = () => {
   };
 
   const updateTaskAndSave = useCallback((taskId: string, updater: (task: Task) => Task, saveMode: 'immediate' | 'debounced' | 'none' = 'debounced') => {
-    let updatedTaskToSave: Task | null = null;
     setTasks(prev => {
       const taskIndex = prev.findIndex(t => t.id === taskId);
       if (taskIndex === -1) return prev;
 
       const updatedTask = updater(prev[taskIndex]);
-      updatedTaskToSave = updatedTask;
+      
+      if (saveMode !== 'none') {
+        handleSingleTaskSave(updatedTask, saveMode === 'immediate');
+      }
 
       const nextTasks = [...prev];
       nextTasks[taskIndex] = updatedTask;
       return nextTasks;
     });
-
-    if (saveMode !== 'none' && updatedTaskToSave) {
-      handleSingleTaskSave(updatedTaskToSave, saveMode === 'immediate');
-    }
   }, [handleSingleTaskSave]);
 
   const addTask = (overrides?: Partial<Task>) => {
@@ -461,7 +457,20 @@ const App: React.FC = () => {
       }
     };
 
-    matchesInitial.forEach(t => addAncestors(t));
+    const addDescendants = (task: Task) => {
+      expandedSet.add(task.id);
+      const children = tasks.filter(t => t.parentId?.trim() === (task.uuid || task.id));
+      children.forEach(child => {
+        if (!expandedSet.has(child.id)) {
+          addDescendants(child);
+        }
+      });
+    };
+
+    matchesInitial.forEach(t => {
+      addAncestors(t);
+      addDescendants(t);
+    });
 
     const baseFiltered = tasks.filter(t => expandedSet.has(t.id));
 
@@ -737,11 +746,22 @@ const App: React.FC = () => {
 
           <div className="flex items-center gap-2 overflow-x-auto w-full md:w-auto">
             <div className="flex bg-slate-100 p-1 rounded-xl">
-              <button onClick={() => setViewMode('list')} className={`p-2 rounded-lg ${viewMode === 'list' ? 'bg-white shadow text-red-600' : 'text-slate-400'}`}><List className="w-5 h-5" /></button>
-              <button onClick={() => setViewMode('timeline')} className={`p-2 rounded-lg ${viewMode === 'timeline' ? 'bg-white shadow text-red-600' : 'text-slate-400'}`}><Calendar className="w-5 h-5" /></button>
-              <button onClick={() => setViewMode('matrix')} className={`p-2 rounded-lg ${viewMode === 'matrix' ? 'bg-white shadow text-red-600' : 'text-slate-400'}`}><LayoutGrid className="w-5 h-5" /></button>
-              {isAdmin && <button onClick={() => setViewMode('evaluation')} className={`p-2 rounded-lg ${viewMode === 'evaluation' ? 'bg-white shadow text-red-600' : 'text-slate-400'}`}><Award className="w-5 h-5" /></button>}
+              <button onClick={() => setViewMode('list')} className={`p-2 rounded-lg ${viewMode === 'list' ? 'bg-white shadow text-red-600' : 'text-slate-400'}`} title="リストビュー"><List className="w-5 h-5" /></button>
+              <button onClick={() => setViewMode('timeline')} className={`p-2 rounded-lg ${viewMode === 'timeline' ? 'bg-white shadow text-red-600' : 'text-slate-400'}`} title="タイムライン"><Calendar className="w-5 h-5" /></button>
+              <button onClick={() => setViewMode('matrix')} className={`p-2 rounded-lg ${viewMode === 'matrix' ? 'bg-white shadow text-red-600' : 'text-slate-400'}`} title="マトリックス"><LayoutGrid className="w-5 h-5" /></button>
+              {isAdmin && <button onClick={() => setViewMode('evaluation')} className={`p-2 rounded-lg ${viewMode === 'evaluation' ? 'bg-white shadow text-red-600' : 'text-slate-400'}`} title="評価"><Award className="w-5 h-5" /></button>}
+              <button onClick={() => setViewMode('activity')} className={`p-2 rounded-lg ${viewMode === 'activity' ? 'bg-white shadow text-red-600' : 'text-slate-400'}`} title="履歴"><History className="w-5 h-5" /></button>
             </div>
+
+            <button onClick={() => {
+              const searchInput = document.getElementById('task-search-input');
+              if (searchInput) {
+                searchInput.focus();
+                searchInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }
+            }} className="p-3 bg-white border border-slate-200 rounded-xl text-slate-400 hover:text-red-600 shadow-sm transition-all" title="検索">
+              <Search className="w-5 h-5" />
+            </button>
 
             <button onClick={handleAiAnalyze} className="p-3 bg-white border border-red-100 text-red-500 rounded-xl hover:bg-red-50 shadow-sm transition-all" title="AI分析">
               {isAiAnalyzing ? <Loader2 className="w-5 h-5 animate-spin" /> : <BrainCircuit className="w-5 h-5" />}
@@ -772,6 +792,7 @@ const App: React.FC = () => {
         <div className="mb-6 relative max-w-md">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
           <input
+            id="task-search-input"
             type="text"
             placeholder="タスク検索..."
             className="w-full pl-10 pr-4 py-4 bg-white border border-slate-200 rounded-2xl font-bold text-sm outline-none focus:border-red-500 shadow-sm"
@@ -851,6 +872,22 @@ const App: React.FC = () => {
                     }}
                   />
                 ))
+              )}
+
+              {viewMode === 'activity' && (
+                <ActivityFeed
+                  tasks={tasks}
+                  onTaskClick={(taskId) => {
+                    setViewMode('list');
+                    setSearchTerm('');
+                    setEpicFilter(null);
+                    setExpandedTaskId(taskId);
+                    setInitialTaskTab('basic');
+                    setTimeout(() => {
+                      document.getElementById(taskId)?.scrollIntoView({ behavior: 'smooth' });
+                    }, 100);
+                  }}
+                />
               )}
 
               {viewMode === 'matrix' && <MatrixView tasks={tasks.filter(t => !t.isSoftDeleted)} />}

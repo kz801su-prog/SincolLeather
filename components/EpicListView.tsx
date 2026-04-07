@@ -1,7 +1,7 @@
 
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Task, TaskStatus } from '../types';
-import { Briefcase, ChevronRight, CheckCircle2, Clock, AlertTriangle, TrendingUp } from 'lucide-react';
+import { Briefcase, ChevronRight, CheckCircle2, Clock, AlertTriangle, TrendingUp, Search } from 'lucide-react';
 
 interface Props {
   tasks: Task[];
@@ -10,6 +10,8 @@ interface Props {
 }
 
 export const EpicListView: React.FC<Props> = ({ tasks, onEpicClick, onClose }) => {
+  const [searchTerm, setSearchTerm] = useState('');
+  
   const epicStats = useMemo(() => {
     const stats: Record<string, { 
       name: string, 
@@ -51,10 +53,16 @@ export const EpicListView: React.FC<Props> = ({ tasks, onEpicClick, onClose }) =
     return Object.values(stats).sort((a, b) => b.total - a.total);
   }, [tasks]);
 
+  const filteredEpicStats = useMemo(() => {
+    return epicStats.filter(epic => 
+      epic.name.toLowerCase().includes(searchTerm.toLowerCase())
+    );
+  }, [epicStats, searchTerm]);
+
   return (
     <div className="fixed inset-0 z-[200] bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4">
       <div className="bg-white rounded-[2.5rem] w-full max-w-4xl max-h-[85vh] overflow-hidden shadow-2xl flex flex-col animate-in zoom-in duration-200">
-        <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+        <div className="p-8 border-b border-slate-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-6 bg-slate-50/50">
           <div className="flex items-center gap-4">
             <div className="w-12 h-12 bg-red-600 rounded-2xl flex items-center justify-center text-white shadow-lg">
               <Briefcase className="w-6 h-6" />
@@ -64,17 +72,30 @@ export const EpicListView: React.FC<Props> = ({ tasks, onEpicClick, onClose }) =
               <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">全プロジェクトの進捗状況と統計</p>
             </div>
           </div>
-          <button 
-            onClick={onClose}
-            className="p-3 bg-white border border-slate-200 rounded-xl text-slate-400 hover:text-red-600 transition-all shadow-sm"
-          >
-            閉じる
-          </button>
+          
+          <div className="flex items-center gap-4 w-full md:w-auto">
+            <div className="relative flex-1 md:w-64">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <input
+                type="text"
+                placeholder="エピック検索..."
+                className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-bold outline-none focus:border-red-500 shadow-sm"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
+            </div>
+            <button 
+              onClick={onClose}
+              className="p-3 bg-white border border-slate-200 rounded-xl text-slate-400 hover:text-red-600 transition-all shadow-sm"
+            >
+              閉じる
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-8 custom-scrollbar">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {epicStats.map((epic) => {
+            {filteredEpicStats.map((epic) => {
               const progress = epic.total > 0 ? Math.round((epic.completed / epic.total) * 100) : 0;
               
               return (

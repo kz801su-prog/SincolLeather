@@ -994,7 +994,7 @@ export const TimelineView: React.FC<Props> = ({ tasks, members, onUpdateTask, on
                   if (offset >= 0 && offset <= totalDays) {
                     const pos = (offset / totalDays) * 100;
                     return (
-                      <div key={item.date} className="absolute top-0 bottom-0 border-l-[3px] border-red-500/50 z-10 pointer-events-none" style={{ left: `${pos}%` }}>
+                      <div key={`${item.date}-${item.label}`} className="absolute top-0 bottom-0 border-l-[3px] border-red-500/50 z-10 pointer-events-none" style={{ left: `${pos}%` }}>
                         <div className="absolute top-6 -translate-x-1/2 bg-red-600 text-white text-[10px] font-black px-2 py-1 rounded shadow-md whitespace-nowrap z-50">
                           {item.label}
                         </div>
@@ -1111,7 +1111,7 @@ export const TimelineView: React.FC<Props> = ({ tasks, members, onUpdateTask, on
                                     if (msPos < 0 || msPos > 100) return null;
                                     return (
                                       <div
-                                        key={idx}
+                                        key={`${ms.date}-${ms.title}-${idx}`}
                                         className="absolute top-3 w-4 h-4 -ml-2 z-30 cursor-pointer group/ms pointer-events-auto hover:scale-125 transition-transform"
                                         style={{ left: `${msPos}%` }}
                                       >

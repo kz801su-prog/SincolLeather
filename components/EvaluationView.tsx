@@ -165,7 +165,7 @@ export const EvaluationView: React.FC<Props> = ({
             </h3>
             <div className="h-[300px] w-full">
               <ResponsiveContainer width="100%" height="100%">
-                <RadarChart cx="50%" cy="50%" outerRadius="65%" data={personalStats.radarData}>
+                <RadarChart id="personal-radar-chart" cx="50%" cy="50%" outerRadius="65%" data={personalStats.radarData}>
                   <PolarGrid stroke="#e2e8f0" />
                   <PolarAngleAxis dataKey="subject" tick={{ fontSize: 12, fontWeight: 'bold', fill: '#64748b' }} />
                   <PolarRadiusAxis angle={30} domain={[0, 5]} tick={{ fontSize: 10, fill: '#94a3b8' }} />
@@ -258,7 +258,7 @@ export const EvaluationView: React.FC<Props> = ({
               </h3>
               <div className="h-[400px] w-full">
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={stats.data} layout="vertical" margin={{ left: 40, right: 40 }}>
+                  <BarChart id="admin-bar-chart" data={stats.data} layout="vertical" margin={{ left: 40, right: 40 }}>
                     <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f1f5f9" />
                     <XAxis type="number" hide />
                     <YAxis dataKey="name" type="category" width={80} tick={{ fontSize: 12, fontWeight: 'bold' }} axisLine={false} tickLine={false} />
@@ -282,7 +282,7 @@ export const EvaluationView: React.FC<Props> = ({
               </h3>
               <div className="h-[400px] w-full">
                 <ResponsiveContainer width="100%" height="100%">
-                  <RadarChart cx="50%" cy="50%" outerRadius="80%" data={stats.data}>
+                  <RadarChart id="admin-radar-chart" cx="50%" cy="50%" outerRadius="80%" data={stats.data}>
                     <PolarGrid stroke="#e2e8f0" />
                     <PolarAngleAxis dataKey="name" tick={{ fontSize: 10, fontWeight: 'bold', fill: '#64748b' }} />
                     <PolarRadiusAxis angle={30} domain={[0, 5]} />

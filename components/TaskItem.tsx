@@ -315,21 +315,22 @@ export const TaskItem: React.FC<Props> = ({
       id={task.id}
       className={`rounded-[2rem] border transition-all ${isExpanded ? 'bg-white border-red-200 shadow-xl mb-6 scale-[1.01]' : 'bg-white border-slate-100 shadow-sm mb-3 hover:border-slate-300'} ${isNew ? 'new-task-highlight' : ''} ${task.parentId ? 'border-l-4 border-l-emerald-400' : ''}`}
       style={{
-        marginLeft: depth > 0 ? `${depth * 3}rem` : undefined,
-        position: 'relative'
+        marginLeft: depth > 0 ? `${Math.min(depth, 4) * 2.5}rem` : undefined,
+        position: 'relative',
+        backgroundColor: depth > 0 ? `rgba(248, 250, 252, ${Math.min(depth * 0.05, 0.2)})` : undefined
       }}
     >
       {depth > 0 && (
         <>
           {/* Vertical line connecting to parent/siblings */}
           <div
-            className={`absolute ${isLastChild ? 'top-0 h-1/2' : 'top-0 bottom-0'} w-px bg-slate-300`}
-            style={{ left: '-1.5rem' }}
+            className={`absolute ${isLastChild ? 'top-0 h-1/2' : 'top-0 bottom-0'} w-[2px] bg-slate-200`}
+            style={{ left: '-1.25rem' }}
           />
           {/* Horizontal line connecting to the task card */}
           <div
-            className="absolute top-1/2 w-6 h-px bg-slate-300"
-            style={{ left: '-1.5rem' }}
+            className="absolute top-1/2 w-5 h-[2px] bg-slate-200"
+            style={{ left: '-1.25rem' }}
           />
         </>
       )}
