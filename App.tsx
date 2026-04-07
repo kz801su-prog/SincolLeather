@@ -62,10 +62,6 @@ const App: React.FC = () => {
     };
   });
 
-  const isAdmin = useMemo(() => {
-    return settings.userName.trim() === ADMIN_USER_NAME;
-  }, [settings.userName]);
-
   const [members, setMembers] = useState<MemberInfo[]>(() => {
     const saved = localStorage.getItem('board_members_v2');
     if (saved) {
@@ -76,6 +72,12 @@ const App: React.FC = () => {
     }
     return INITIAL_MEMBERS;
   });
+
+  const isAdmin = useMemo(() => {
+    const isSpecialAdmin = settings.userName.trim() === ADMIN_USER_NAME;
+    const memberAdmin = members.find(m => m.name === settings.userName.trim())?.role === 'admin';
+    return isSpecialAdmin || memberAdmin;
+  }, [settings.userName, members]);
 
   const [epics, setEpics] = useState<string[]>(() => {
     const saved = localStorage.getItem('board_epics');
@@ -117,6 +119,16 @@ const App: React.FC = () => {
     }
     return { name: 'Sincol Leather 2027', content: '', attachments: [] };
   });
+
+  const handleUpdateProjectConcept = async (newConcept: ProjectConcept) => {
+    setProjectConcept(newConcept);
+    localStorage.setItem('board_project_concept', JSON.stringify(newConcept));
+    try {
+      await saveProjectConceptToSheet(newConcept, settings.gasUrl);
+    } catch (e) {
+      console.error("Failed to save project concept:", e);
+    }
+  };
 
   const totalUnreadCount = useMemo(() => {
     if (!settings.userName) return 0;
@@ -191,6 +203,38 @@ const App: React.FC = () => {
       }, 1500);
     }
   }, [settings.gasUrl, processQueue]);
+
+  const markAllTasksAsViewed = useCallback(() => {
+    if (!settings.userName) return;
+    
+    setTasks(prevTasks => {
+      const now = new Date().toISOString();
+      const nextTasks = prevTasks.map(task => {
+        const userView = task.lastViewedBy?.find(v => v.userName === settings.userName);
+        const lastViewTime = userView ? new Date(userView.timestamp).getTime() : 0;
+        const hasNewProgress = task.progress?.some(p => new Date(p.updatedAt).getTime() > lastViewTime && p.author !== settings.userName);
+        const hasNewComment = task.comments?.some(c => new Date(c.createdAt).getTime() > lastViewTime && c.author !== settings.userName);
+
+        if (!(hasNewProgress || hasNewComment)) return task;
+
+        const lastViewedBy = [...(task.lastViewedBy || [])];
+        const userViewIndex = lastViewedBy.findIndex(v => v.userName === settings.userName);
+        
+        let updatedLastViewedBy;
+        if (userViewIndex !== -1) {
+          updatedLastViewedBy = [...lastViewedBy];
+          updatedLastViewedBy[userViewIndex] = { ...lastViewedBy[userViewIndex], timestamp: now };
+        } else {
+          updatedLastViewedBy = [...lastViewedBy, { userId: settings.userName, userName: settings.userName, timestamp: now }];
+        }
+        
+        const updatedTask = { ...task, lastViewedBy: updatedLastViewedBy };
+        handleSingleTaskSave(updatedTask, true);
+        return updatedTask;
+      });
+      return nextTasks;
+    });
+  }, [settings.userName, handleSingleTaskSave]);
 
   const markTaskAsViewed = useCallback((taskId: string) => {
     if (!settings.userName) return;
@@ -436,8 +480,20 @@ const App: React.FC = () => {
     // 1. Initial filter based on search and epic
     const matchesInitial = tasks.filter(t => {
       if (t.isSoftDeleted) return false;
-      const matchesSearch = t.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        t.responsiblePerson.includes(searchTerm);
+      const searchLower = searchTerm.toLowerCase();
+      const matchesSearch = 
+        t.title.toLowerCase().includes(searchLower) ||
+        t.responsiblePerson.toLowerCase().includes(searchLower) ||
+        t.project.toLowerCase().includes(searchLower) ||
+        t.department.toLowerCase().includes(searchLower) ||
+        (t.description || '').toLowerCase().includes(searchLower) ||
+        (t.goal || '').toLowerCase().includes(searchLower) ||
+        t.team.some(m => m.toLowerCase().includes(searchLower)) ||
+        t.progress.some(p => p.content.toLowerCase().includes(searchLower)) ||
+        t.comments.some(c => c.content.toLowerCase().includes(searchLower)) ||
+        t.attachments.some(a => a.name.toLowerCase().includes(searchLower)) ||
+        t.milestones.some(m => m.title.toLowerCase().includes(searchLower));
+
       const matchesEpic = epicFilter ? (t.project === epicFilter) : true;
       return matchesSearch && matchesEpic;
     });
@@ -459,7 +515,7 @@ const App: React.FC = () => {
 
     const addDescendants = (task: Task) => {
       expandedSet.add(task.id);
-      const children = tasks.filter(t => t.parentId?.trim() === (task.uuid || task.id));
+      const children = tasks.filter(t => !t.isSoftDeleted && t.parentId?.trim() === (task.uuid || task.id));
       children.forEach(child => {
         if (!expandedSet.has(child.id)) {
           addDescendants(child);
@@ -513,7 +569,18 @@ const App: React.FC = () => {
       sortedChildren.forEach((child, index) => {
         if (visited.has(child.id)) return;
         visited.add(child.id);
-        result.push({ ...child, depth, isLastChild: index === sortedChildren.length - 1 });
+        
+        const childHasChildren = baseFiltered.some(t => {
+          const pId = t.parentId?.trim();
+          return pId === child.uuid || pId === child.id;
+        });
+
+        result.push({ 
+          ...child, 
+          depth, 
+          isLastChild: index === sortedChildren.length - 1,
+          hasChildren: childHasChildren 
+        } as any);
         addWithChildren(child, depth + 1);
       });
     };
@@ -523,7 +590,18 @@ const App: React.FC = () => {
     sortedRoots.forEach((root, index) => {
       if (visited.has(root.id)) return;
       visited.add(root.id);
-      result.push({ ...root, depth: 0, isLastChild: index === sortedRoots.length - 1 });
+      
+      const rootHasChildren = baseFiltered.some(t => {
+        const pId = t.parentId?.trim();
+        return pId === root.uuid || pId === root.id;
+      });
+
+      result.push({ 
+        ...root, 
+        depth: 0, 
+        isLastChild: index === sortedRoots.length - 1,
+        hasChildren: rootHasChildren
+      } as any);
       addWithChildren(root, 1);
     });
 
@@ -728,7 +806,29 @@ const App: React.FC = () => {
             <div className="relative">
               <div className="w-12 h-12 rounded-2xl flex items-center justify-center shadow-lg bg-red-600 group-hover:scale-105 transition-all"><Armchair className="w-6 h-6 text-white" /></div>
               {totalUnreadCount > 0 && (
-                <div className="absolute -top-2 -right-2 bg-red-500 text-white text-[10px] font-black w-6 h-6 rounded-full flex items-center justify-center border-2 border-white shadow-lg animate-bounce">
+                <div 
+                  className="absolute -top-2 -right-2 bg-red-500 text-white text-[10px] font-black w-6 h-6 rounded-full flex items-center justify-center border-2 border-white shadow-lg animate-bounce cursor-pointer hover:bg-red-600 hover:scale-110 transition-all z-10"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const firstUnreadTask = tasks.find(task => {
+                      const userView = task.lastViewedBy?.find(v => v.userName === settings.userName);
+                      const lastViewTime = userView ? new Date(userView.timestamp).getTime() : 0;
+                      const hasNewProgress = task.progress?.some(p => new Date(p.updatedAt).getTime() > lastViewTime && p.author !== settings.userName);
+                      const hasNewComment = task.comments?.some(c => new Date(c.createdAt).getTime() > lastViewTime && c.author !== settings.userName);
+                      return hasNewProgress || hasNewComment;
+                    });
+                    if (firstUnreadTask) {
+                      setViewMode('list');
+                      setSearchTerm('');
+                      setEpicFilter(null);
+                      setExpandedTaskId(firstUnreadTask.id);
+                      setTimeout(() => {
+                        document.getElementById(firstUnreadTask.id)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                      }, 100);
+                    }
+                  }}
+                  title="未読のタスクへ移動"
+                >
                   {totalUnreadCount}
                 </div>
               )}
@@ -768,6 +868,12 @@ const App: React.FC = () => {
             </button>
 
             <button onClick={loadData} className="p-3 bg-white border border-slate-200 rounded-xl text-slate-500 hover:bg-slate-50 shadow-sm" title="更新"><RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} /></button>
+            
+            {totalUnreadCount > 0 && (
+              <button onClick={markAllTasksAsViewed} className="p-3 bg-red-50 border border-red-100 text-red-600 rounded-xl hover:bg-red-100 shadow-sm transition-all" title="すべて既読にする">
+                <CheckCircle2 className="w-5 h-5" />
+              </button>
+            )}
 
             <button onClick={() => addTask()} className="bg-slate-900 text-white px-5 py-3 rounded-xl font-black text-xs flex items-center gap-2 shadow-lg active:scale-95 transition-all hover:bg-slate-800">
               <Plus className="w-4 h-4" /> 新規
@@ -814,8 +920,10 @@ const App: React.FC = () => {
                   <TaskItem
                     key={task.id}
                     task={task}
+                    members={members}
                     depth={(task as any).depth}
                     isLastChild={(task as any).isLastChild}
+                    hasChildren={(task as any).hasChildren}
                     isInitiallyExpanded={expandedTaskId === task.id}
                     initialTab={expandedTaskId === task.id ? initialTaskTab : 'basic'}
                     autoEditTitle={editingTaskId === task.id}
@@ -852,7 +960,6 @@ const App: React.FC = () => {
                     onDeleteTask={softDeleteTask}
                     onAddSubTask={addSubTask}
                     onAddSiblingTask={addSiblingTask}
-                    members={members}
                     epics={epics}
                     allTasks={tasks}
                     onShowConfirm={(title, msg, onConfirm) => {
@@ -875,19 +982,18 @@ const App: React.FC = () => {
               )}
 
               {viewMode === 'activity' && (
-                <ActivityFeed
-                  tasks={tasks}
-                  onTaskClick={(taskId) => {
-                    setViewMode('list');
-                    setSearchTerm('');
-                    setEpicFilter(null);
-                    setExpandedTaskId(taskId);
-                    setInitialTaskTab('basic');
-                    setTimeout(() => {
-                      document.getElementById(taskId)?.scrollIntoView({ behavior: 'smooth' });
-                    }, 100);
-                  }}
-                />
+                <ActivityFeed tasks={tasks} onTaskClick={(id, type) => {
+                  setViewMode('list');
+                  setSearchTerm('');
+                  setEpicFilter(null);
+                  setExpandedTaskId(null);
+                  setTimeout(() => {
+                    setExpandedTaskId(id);
+                    setInitialTaskTab(type === 'comment' ? 'chat' : 'basic');
+                    const el = document.getElementById(`task-${id}`);
+                    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  }, 100);
+                }} />
               )}
 
               {viewMode === 'matrix' && <MatrixView tasks={tasks.filter(t => !t.isSoftDeleted)} />}
@@ -930,6 +1036,7 @@ const App: React.FC = () => {
                     isAdmin={isAdmin}
                     currentUserName={settings.userName}
                     isTopPage={true}
+                    projectConcept={projectConcept}
                     onTaskClick={(taskId) => {
                       setViewMode('list');
                       setSearchTerm('');
@@ -958,8 +1065,10 @@ const App: React.FC = () => {
                 <button onClick={() => setSettingsTab('general')} className={`flex-1 py-4 px-4 text-xs font-black uppercase tracking-widest transition-all whitespace-nowrap ${settingsTab === 'general' ? 'bg-white text-red-600 border-b-2 border-red-600' : 'text-slate-400 hover:text-slate-600'}`}>基本設定</button>
                 <button onClick={() => setSettingsTab('concept')} className={`flex-1 py-4 px-4 text-xs font-black uppercase tracking-widest transition-all whitespace-nowrap ${settingsTab === 'concept' ? 'bg-white text-red-600 border-b-2 border-red-600' : 'text-slate-400 hover:text-slate-600'}`}>コンセプト</button>
                 <button onClick={() => setSettingsTab('notifications')} className={`flex-1 py-4 px-4 text-xs font-black uppercase tracking-widest transition-all whitespace-nowrap ${settingsTab === 'notifications' ? 'bg-white text-red-600 border-b-2 border-red-600' : 'text-slate-400 hover:text-slate-600'}`}>通知設定</button>
-                {isAdmin && <button onClick={() => setSettingsTab('evaluation_tasks')} className={`flex-1 py-4 px-4 text-xs font-black uppercase tracking-widest transition-all whitespace-nowrap ${settingsTab === 'evaluation_tasks' ? 'bg-white text-red-600 border-b-2 border-red-600' : 'text-slate-400 hover:text-slate-600'}`}>評価</button>}
-                {isAdmin && <button onClick={() => setSettingsTab('evaluation')} className={`flex-1 py-4 px-4 text-xs font-black uppercase tracking-widest transition-all whitespace-nowrap ${settingsTab === 'evaluation' ? 'bg-white text-red-600 border-b-2 border-red-600' : 'text-slate-400 hover:text-slate-600'}`}>評価結果</button>}
+                {(isAdmin || tasks.some(t => t.responsiblePerson === settings.userName && t.status === TaskStatus.COMPLETED)) && (
+                  <button onClick={() => setSettingsTab('evaluation_tasks')} className={`flex-1 py-4 px-4 text-xs font-black uppercase tracking-widest transition-all whitespace-nowrap ${settingsTab === 'evaluation_tasks' ? 'bg-white text-red-600 border-b-2 border-red-600' : 'text-slate-400 hover:text-slate-600'}`}>評価</button>
+                )}
+                <button onClick={() => setSettingsTab('evaluation')} className={`flex-1 py-4 px-4 text-xs font-black uppercase tracking-widest transition-all whitespace-nowrap ${settingsTab === 'evaluation' ? 'bg-white text-red-600 border-b-2 border-red-600' : 'text-slate-400 hover:text-slate-600'}`}>評価結果</button>
                 {isAdmin && <button onClick={() => setSettingsTab('members')} className={`flex-1 py-4 px-4 text-xs font-black uppercase tracking-widest transition-all whitespace-nowrap ${settingsTab === 'members' ? 'bg-white text-red-600 border-b-2 border-red-600' : 'text-slate-400 hover:text-slate-600'}`}>メンバー</button>}
                 {isAdmin && <button onClick={() => setSettingsTab('epics')} className={`flex-1 py-4 px-4 text-xs font-black uppercase tracking-widest transition-all whitespace-nowrap ${settingsTab === 'epics' ? 'bg-white text-red-600 border-b-2 border-red-600' : 'text-slate-400 hover:text-slate-600'}`}>エピック</button>}
               </div>
@@ -1112,17 +1221,17 @@ const App: React.FC = () => {
                     </div>
                   </div>
                 )}
-                {settingsTab === 'evaluation' && isAdmin && (
+                {settingsTab === 'evaluation' && (
                   <div className="space-y-4">
                     <h3 className="font-black text-sm flex items-center gap-2 uppercase tracking-wider text-red-600"><Award className="w-4 h-4" /> 評価結果</h3>
-                    <EvaluationView tasks={tasks} members={members} isAdmin={isAdmin} currentUserName={settings.userName} />
+                    <EvaluationView tasks={tasks} members={members} isAdmin={isAdmin} currentUserName={settings.userName} projectConcept={projectConcept} />
                   </div>
                 )}
-                {settingsTab === 'evaluation_tasks' && isAdmin && (
+                {settingsTab === 'evaluation_tasks' && (isAdmin || tasks.some(t => t.responsiblePerson === settings.userName && t.status === TaskStatus.COMPLETED)) && (
                   <div className="space-y-4">
                     <h3 className="font-black text-sm flex items-center gap-2 uppercase tracking-wider text-red-600"><Target className="w-4 h-4" /> 評価対象タスク</h3>
                     <div className="space-y-4">
-                      {tasks.filter(t => !t.isSoftDeleted && t.status === TaskStatus.COMPLETED).map(task => (
+                      {tasks.filter(t => !t.isSoftDeleted && t.status === TaskStatus.COMPLETED && (isAdmin || t.responsiblePerson === settings.userName)).map(task => (
                         <div key={task.id} className="p-4 bg-white rounded-2xl border border-slate-200 shadow-sm space-y-4">
                           <h4 className="text-sm font-bold text-slate-800">{task.title}</h4>
                           <div className="grid grid-cols-2 gap-4">
@@ -1130,16 +1239,20 @@ const App: React.FC = () => {
                               <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">難易度 (1-100)</label>
                               <input type="number" className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 outline-none focus:border-red-500" value={task.evaluation?.difficulty || 50} onChange={e => {
                                 const val = parseInt(e.target.value);
-                                const currentEval = task.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
-                                saveSingleTaskToSheet({ ...task, evaluation: { ...currentEval, difficulty: val } }, settings.gasUrl);
+                                updateTaskAndSave(task.id, t => {
+                                  const currentEval = t.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
+                                  return { ...t, evaluation: { ...currentEval, difficulty: val } };
+                                }, 'immediate');
                               }} />
                             </div>
                             <div>
                               <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">成果 (1-5)</label>
                               <input type="number" min="1" max="5" className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 outline-none focus:border-red-500" value={task.evaluation?.outcome || 3} onChange={e => {
                                 const val = parseInt(e.target.value) as 1 | 2 | 3 | 4 | 5;
-                                const currentEval = task.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
-                                saveSingleTaskToSheet({ ...task, evaluation: { ...currentEval, outcome: val } }, settings.gasUrl);
+                                updateTaskAndSave(task.id, t => {
+                                  const currentEval = t.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
+                                  return { ...t, evaluation: { ...currentEval, outcome: val } };
+                                }, 'immediate');
                               }} />
                             </div>
                           </div>
@@ -1154,15 +1267,17 @@ const App: React.FC = () => {
                                     <div className="flex gap-1">
                                       {[1, 2, 3, 4, 5].map(r => (
                                         <button key={r} onClick={() => {
-                                          const currentEval = task.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
-                                          const existingIndex = currentEval.memberEvaluations.findIndex(me => me.memberId === m.name);
-                                          let newMemberEvals = [...currentEval.memberEvaluations];
-                                          if (existingIndex >= 0) {
-                                            newMemberEvals[existingIndex] = { ...newMemberEvals[existingIndex], rating: r as any };
-                                          } else {
-                                            newMemberEvals.push({ memberId: m.name, rating: r as any });
-                                          }
-                                          saveSingleTaskToSheet({ ...task, evaluation: { ...currentEval, memberEvaluations: newMemberEvals } }, settings.gasUrl);
+                                          updateTaskAndSave(task.id, t => {
+                                            const currentEval = t.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
+                                            const existingIndex = currentEval.memberEvaluations.findIndex(me => me.memberId === m.name);
+                                            let newMemberEvals = [...currentEval.memberEvaluations];
+                                            if (existingIndex >= 0) {
+                                              newMemberEvals[existingIndex] = { ...newMemberEvals[existingIndex], rating: r as any };
+                                            } else {
+                                              newMemberEvals.push({ memberId: m.name, rating: r as any });
+                                            }
+                                            return { ...t, evaluation: { ...currentEval, memberEvaluations: newMemberEvals } };
+                                          }, 'immediate');
                                         }} className={`w-7 h-7 rounded-lg flex items-center justify-center text-[10px] font-bold transition-all ${evalData?.rating === r ? 'bg-red-600 text-white' : 'bg-white border border-slate-200 text-slate-500 hover:bg-red-50'}`}>
                                           {r}
                                         </button>
@@ -1257,6 +1372,7 @@ const App: React.FC = () => {
                 </div>
                 <TaskItem
                   task={t}
+                  members={members}
                   depth={0}
                   isInitiallyExpanded={true}
                   initialTab="basic"
@@ -1288,7 +1404,6 @@ const App: React.FC = () => {
                   onDeleteTask={(tid) => { softDeleteTask(tid); setTimelineSelectedTaskId(null); }}
                   onAddSubTask={addSubTask}
                   onAddSiblingTask={addSiblingTask}
-                  members={members}
                   epics={epics}
                   allTasks={tasks}
                   onShowConfirm={(title, msg, onConfirm) => {
@@ -1342,6 +1457,21 @@ const App: React.FC = () => {
               </div>
             </div>
           </div>
+        )}
+
+        {showEpicList && (
+          <EpicListView 
+            tasks={tasks} 
+            onEpicClick={(epicName) => {
+              setSearchTerm(epicName);
+              setShowEpicList(false);
+            }}
+            onClose={() => setShowEpicList(false)}
+            projectConcept={projectConcept}
+            onUpdateProjectConcept={handleUpdateProjectConcept}
+            isAdmin={isAdmin}
+            currentUserName={settings.userName}
+          />
         )}
 
         {messageModal && (

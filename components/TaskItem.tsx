@@ -6,14 +6,14 @@ import {
   CheckCircle2, Check, Edit2, MessageSquare, UserPlus, X,
   Settings, Star, Target, ShieldCheck, Calculator, Users, Lock, AlertTriangle, Save, Loader2,
   Paperclip, ExternalLink, Trash2, Send, Link as LinkIcon, FileText,
-  Activity, TrendingUp, ChevronRight, List, BrainCircuit, UploadCloud, Bell
+  Activity, TrendingUp, ChevronRight, List, BrainCircuit, UploadCloud, Bell, Award
 } from 'lucide-react';
 
 interface Props {
   task: Task;
   isInitiallyExpanded?: boolean;
   autoEditTitle?: boolean;
-  initialTab?: 'basic' | 'chat' | 'files' | 'hierarchy';
+  initialTab?: 'basic' | 'chat' | 'files' | 'hierarchy' | 'evaluation';
   isAdmin?: boolean;
   currentUserName: string;
   onAddProgress: (taskId: string, content: string) => void;
@@ -33,6 +33,7 @@ interface Props {
   allTasks?: Task[]; // To show sub-tasks
   depth?: number;
   isLastChild?: boolean;
+  hasChildren?: boolean;
 }
 
 export const TaskItem: React.FC<Props> = ({
@@ -58,10 +59,12 @@ export const TaskItem: React.FC<Props> = ({
   onShowConfirm,
   allTasks = [],
   depth = 0,
-  isLastChild = false
+  isLastChild = false,
+  hasChildren = false
 }) => {
   const [isExpanded, setIsExpanded] = useState(isInitiallyExpanded);
-  const [activeTab, setActiveTab] = useState<'basic' | 'chat' | 'files' | 'hierarchy'>(initialTab as any || 'basic');
+  const [activeTab, setActiveTab] = useState<'basic' | 'chat' | 'files' | 'hierarchy' | 'evaluation'>(initialTab as any || 'basic');
+  const chatContainerRef = useRef<HTMLDivElement>(null);
 
   // Basic Info State
   const [newProgress, setNewProgress] = useState('');
@@ -127,27 +130,29 @@ export const TaskItem: React.FC<Props> = ({
   }).length || 0;
   const totalUnread = currentUserName ? unreadProgress + unreadComments : 0;
 
-  const markedAsViewedRef = useRef<string | null>(null);
+  const lastMarkedUnreadCount = useRef(0);
 
   useEffect(() => {
-    if (isExpanded && totalUnread > 0 && markedAsViewedRef.current !== task.id) {
-      markedAsViewedRef.current = task.id;
+    if (isExpanded && totalUnread > 0 && totalUnread !== lastMarkedUnreadCount.current) {
+      lastMarkedUnreadCount.current = totalUnread;
       onMarkAsViewed(task.id);
     }
     if (!isExpanded) {
-      markedAsViewedRef.current = null;
+      lastMarkedUnreadCount.current = 0;
     }
   }, [isExpanded, totalUnread, task.id, onMarkAsViewed]);
 
+  const canEvaluate = isAdmin || currentUserName === '矢追和彦' || task.responsiblePerson === currentUserName;
+
   const handleUpdateEvaluation = (evalUpdate: Partial<TaskEvaluation>) => {
-    if (!isAdmin) return;
+    if (!canEvaluate) return;
     const currentEval = task.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
     const updatedEval = { ...currentEval, ...evalUpdate };
     onUpdateTaskDetails?.(task.id, { evaluation: updatedEval });
   };
 
   const handleMemberRating = (memberName: string, rating: 1 | 2 | 3 | 4 | 5) => {
-    if (!isAdmin) return;
+    if (!canEvaluate) return;
     const currentEval = task.evaluation || { difficulty: 50, outcome: 3, memberEvaluations: [] };
     const existingIndex = currentEval.memberEvaluations.findIndex(m => m.memberId === memberName);
 
@@ -186,6 +191,12 @@ export const TaskItem: React.FC<Props> = ({
       setIsSaving(false);
     }
   };
+
+  useEffect(() => {
+    if (activeTab === 'chat' && chatContainerRef.current) {
+      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+    }
+  }, [activeTab, task.comments?.length]);
 
   const handlePostComment = () => {
     if (!newComment.trim()) return;
@@ -315,22 +326,25 @@ export const TaskItem: React.FC<Props> = ({
       id={task.id}
       className={`rounded-[2rem] border transition-all ${isExpanded ? 'bg-white border-red-200 shadow-xl mb-6 scale-[1.01]' : 'bg-white border-slate-100 shadow-sm mb-3 hover:border-slate-300'} ${isNew ? 'new-task-highlight' : ''} ${task.parentId ? 'border-l-4 border-l-emerald-400' : ''}`}
       style={{
-        marginLeft: depth > 0 ? `${Math.min(depth, 4) * 2.5}rem` : undefined,
+        marginLeft: depth > 0 ? `${Math.min(depth, 4) * 3.5}rem` : undefined,
+        marginTop: depth > 0 ? '0.5rem' : undefined,
         position: 'relative',
-        backgroundColor: depth > 0 ? `rgba(248, 250, 252, ${Math.min(depth * 0.05, 0.2)})` : undefined
+        backgroundColor: depth > 0 ? `rgba(248, 250, 252, ${Math.min(depth * 0.08, 0.3)})` : undefined,
+        transform: depth > 0 ? `scale(${Math.max(1 - depth * 0.02, 0.92)})` : undefined,
+        transformOrigin: 'left center'
       }}
     >
       {depth > 0 && (
         <>
           {/* Vertical line connecting to parent/siblings */}
           <div
-            className={`absolute ${isLastChild ? 'top-0 h-1/2' : 'top-0 bottom-0'} w-[2px] bg-slate-200`}
-            style={{ left: '-1.25rem' }}
+            className={`absolute ${isLastChild ? 'top-[-1rem] h-[calc(50%+1rem)]' : 'top-[-1rem] bottom-[-1rem]'} w-[2px] bg-slate-200`}
+            style={{ left: '-1.75rem' }}
           />
           {/* Horizontal line connecting to the task card */}
           <div
-            className="absolute top-1/2 w-5 h-[2px] bg-slate-200"
-            style={{ left: '-1.25rem' }}
+            className="absolute top-1/2 w-7 h-[2px] bg-slate-200"
+            style={{ left: '-1.75rem' }}
           />
         </>
       )}
@@ -338,8 +352,13 @@ export const TaskItem: React.FC<Props> = ({
         <div className="flex items-center space-x-4 flex-1 min-w-0">
           <div className="flex flex-col items-center">
             {task.parentId && <div className="text-[8px] font-black text-emerald-500 uppercase mb-1">Sub</div>}
-            <div className={`w-12 h-12 rounded-xl flex items-center justify-center border-2 ${isCompleted ? 'bg-emerald-500 border-emerald-400 text-white' : 'bg-slate-50 border-slate-100 text-slate-300'}`}>
+            <div className={`w-12 h-12 rounded-xl flex items-center justify-center border-2 ${isCompleted ? 'bg-emerald-500 border-emerald-400 text-white' : 'bg-slate-50 border-slate-100 text-slate-300'} relative`}>
               {isCompleted ? <CheckCircle2 className="w-6 h-6" /> : <Clock className="w-6 h-6" />}
+              {hasChildren && !isExpanded && (
+                <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-red-500 rounded-full flex items-center justify-center border-2 border-white">
+                  <Activity className="w-2 h-2 text-white" />
+                </div>
+              )}
             </div>
           </div>
           <div className="flex-1 min-w-0">
@@ -348,7 +367,16 @@ export const TaskItem: React.FC<Props> = ({
               <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${task.priority === '高' ? 'bg-rose-100 text-rose-600' : 'bg-blue-100 text-blue-600'}`}>{task.priority}</span>
               <span className="text-[9px] font-black uppercase px-2 py-0.5 rounded-full bg-red-50 text-red-600">{effectiveProject}</span>
               {totalUnread > 0 && (
-                <span className="text-[9px] font-black bg-red-600 text-white px-2 py-0.5 rounded-full flex items-center gap-1 animate-pulse">
+                <span 
+                  className="text-[9px] font-black bg-red-600 text-white px-2 py-0.5 rounded-full flex items-center gap-1 animate-pulse cursor-pointer hover:bg-red-700 hover:scale-110 transition-all"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!isExpanded) setIsExpanded(true);
+                    if (unreadComments > 0) setActiveTab('chat');
+                    else if (unreadProgress > 0) setActiveTab('basic');
+                  }}
+                  title="新しい書き込みへ移動"
+                >
                   <Bell className="w-2 h-2 fill-white" /> {totalUnread} NEW
                 </span>
               )}
@@ -430,12 +458,17 @@ export const TaskItem: React.FC<Props> = ({
         <div className="px-6 pb-8 animate-in slide-in-from-top-2 duration-200">
           <div className="flex justify-between items-center border-b border-slate-50 mb-6 relative">
             <div className="flex space-x-1">
-              <button onClick={() => setActiveTab('basic')} className={`px-6 py-3 text-xs font-black rounded-t-xl transition-all ${activeTab === 'basic' ? 'bg-slate-50 text-red-600 border-t border-x border-slate-100' : 'text-slate-400 hover:text-slate-600'}`}>
+              <button onClick={() => setActiveTab('basic')} className={`px-6 py-3 text-xs font-black rounded-t-xl transition-all flex items-center gap-2 ${activeTab === 'basic' ? 'bg-slate-50 text-red-600 border-t border-x border-slate-100' : 'text-slate-400 hover:text-slate-600'}`}>
                 基本情報
+                {unreadProgress > 0 && <span className="bg-red-600 text-white px-1.5 rounded-full text-[9px] animate-pulse">{unreadProgress}</span>}
               </button>
               <button onClick={() => setActiveTab('chat')} className={`px-6 py-3 text-xs font-black rounded-t-xl transition-all flex items-center gap-2 ${activeTab === 'chat' ? 'bg-slate-50 text-red-600 border-t border-x border-slate-100' : 'text-slate-400 hover:text-slate-600'}`}>
                 <MessageSquare className="w-3 h-3" /> チャット
-                {task.comments?.length > 0 && <span className="bg-red-100 text-red-600 px-1.5 rounded-full text-[9px]">{task.comments.length}</span>}
+                {unreadComments > 0 ? (
+                  <span className="bg-red-600 text-white px-1.5 rounded-full text-[9px] animate-pulse">{unreadComments}</span>
+                ) : task.comments?.length > 0 && (
+                  <span className="bg-red-100 text-red-600 px-1.5 rounded-full text-[9px]">{task.comments.length}</span>
+                )}
               </button>
               <button onClick={() => setActiveTab('files')} className={`px-6 py-3 text-xs font-black rounded-t-xl transition-all flex items-center gap-2 ${activeTab === 'files' ? 'bg-slate-50 text-red-600 border-t border-x border-slate-100' : 'text-slate-400 hover:text-slate-600'}`}>
                 <Paperclip className="w-3 h-3" /> ファイル
@@ -444,6 +477,11 @@ export const TaskItem: React.FC<Props> = ({
               <button onClick={() => setActiveTab('hierarchy')} className={`px-6 py-3 text-xs font-black rounded-t-xl transition-all flex items-center gap-2 ${activeTab === 'hierarchy' ? 'bg-slate-50 text-red-600 border-t border-x border-slate-100' : 'text-slate-400 hover:text-slate-600'}`}>
                 <Activity className="w-3 h-3" /> 構造 (WBS)
               </button>
+              {task.status === TaskStatus.COMPLETED && (
+                <button onClick={() => setActiveTab('evaluation')} className={`px-6 py-3 text-xs font-black rounded-t-xl transition-all flex items-center gap-2 ${activeTab === 'evaluation' ? 'bg-slate-50 text-red-600 border-t border-x border-slate-100' : 'text-slate-400 hover:text-slate-600'}`}>
+                  <Award className="w-3 h-3" /> 評価
+                </button>
+              )}
             </div>
             {/* Upper Save Button */}
             <button
@@ -640,7 +678,10 @@ export const TaskItem: React.FC<Props> = ({
 
               <div className="space-y-4">
                 <div className="bg-red-50/50 p-6 rounded-2xl border border-red-100 h-full flex flex-col">
-                  <h4 className="font-bold text-red-900 text-sm mb-4 flex items-center gap-2"><History className="w-4 h-4" /> 履歴・最新進捗</h4>
+                  <h4 className="font-bold text-red-900 text-sm mb-4 flex items-center gap-2">
+                    <History className="w-4 h-4" /> 
+                    最新の書き込み: {task.progress?.[0]?.author || '履歴なし'}
+                  </h4>
 
                   <div className="flex gap-2 mb-4">
                     <input className="flex-1 p-3 bg-white border border-red-100 rounded-xl text-xs font-bold outline-none focus:border-red-500" placeholder="現在の状況を報告..." value={newProgress} onChange={e => setNewProgress(e.target.value)} />
@@ -663,7 +704,10 @@ export const TaskItem: React.FC<Props> = ({
           {/* === CHAT TAB === */}
           {activeTab === 'chat' && (
             <div className="space-y-6 pt-4 animate-in fade-in duration-200">
-              <div className="bg-slate-50 rounded-2xl p-4 border border-slate-100 min-h-[300px] max-h-[400px] overflow-y-auto custom-scrollbar space-y-4">
+              <div 
+                ref={chatContainerRef}
+                className="bg-slate-50 rounded-2xl p-4 border border-slate-100 min-h-[300px] max-h-[400px] overflow-y-auto custom-scrollbar space-y-4"
+              >
                 {task.comments && task.comments.length > 0 ? task.comments.map((comment) => (
                   <div key={comment.id} className={`flex flex-col ${comment.author === currentUserName ? 'items-end' : 'items-start'}`}>
                     <div className={`flex items-end gap-2 max-w-[80%] ${comment.author === currentUserName ? 'flex-row-reverse' : 'flex-row'}`}>
@@ -840,6 +884,100 @@ export const TaskItem: React.FC<Props> = ({
                 <p className="text-[11px] font-bold text-red-700 leading-relaxed">
                   現代のプロジェクト管理では、大きな目標（エピック）を具体的な成果物（親タスク）に分解し、それをさらに実行可能な最小単位（枝タスク）に落とし込みます。
                   同じライン上の「兄弟タスク」は、一つの成果物を完成させるための連続したフローを表します。
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* === EVALUATION TAB === */}
+          {activeTab === 'evaluation' && (
+            <div className="pt-4 space-y-8 animate-in fade-in duration-300">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-6">
+                  <h4 className="font-black text-xs text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                    <Award className="w-4 h-4 text-red-600" /> タスク評価 (全体)
+                  </h4>
+                  
+                  <div className="space-y-4">
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">難易度 (1-100)</label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="100"
+                        disabled={!canEvaluate}
+                        className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-700 outline-none focus:border-red-500 disabled:opacity-50"
+                        value={task.evaluation?.difficulty || 50}
+                        onChange={e => handleUpdateEvaluation({ difficulty: parseInt(e.target.value) })}
+                      />
+                      <p className="text-[9px] text-slate-400 mt-1 font-bold">※ 50点を基準に、タスクの重さを設定してください</p>
+                    </div>
+
+                    <div>
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">成果 (1-5)</label>
+                      <div className="grid grid-cols-5 gap-2">
+                        {[1, 2, 3, 4, 5].map(v => (
+                          <button
+                            key={v}
+                            disabled={!canEvaluate}
+                            onClick={() => handleUpdateEvaluation({ outcome: v as any })}
+                            className={`py-3 rounded-xl text-xs font-black transition-all border-2 ${task.evaluation?.outcome === v ? 'bg-red-600 border-red-600 text-white' : 'bg-white border-slate-100 text-slate-400 hover:bg-slate-50 disabled:opacity-50'}`}
+                          >
+                            {v}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-[9px] text-slate-400 mt-1 font-bold">※ 3点を基準に、出来栄えを評価してください (1=20%, 5=100%)</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-6">
+                  <h4 className="font-black text-xs text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                    <Users className="w-4 h-4 text-red-600" /> メンバー別貢献度評価
+                  </h4>
+                  
+                  <div className="space-y-3 max-h-[300px] overflow-y-auto custom-scrollbar pr-2">
+                    {members.filter(m => task.team?.includes(m.name)).map(m => {
+                      const evalData = task.evaluation?.memberEvaluations?.find(me => me.memberId === m.name);
+                      return (
+                        <div key={m.name} className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-black text-slate-700">{m.name}</span>
+                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">貢献度 (1-5)</span>
+                          </div>
+                          <div className="flex gap-1">
+                            {[1, 2, 3, 4, 5].map(r => (
+                              <button
+                                key={r}
+                                disabled={!canEvaluate}
+                                onClick={() => handleMemberRating(m.name, r as any)}
+                                className={`flex-1 py-2 rounded-lg text-[10px] font-black transition-all ${evalData?.rating === r ? 'bg-red-600 text-white' : 'bg-white border border-slate-200 text-slate-500 hover:bg-red-50 disabled:opacity-50'}`}
+                              >
+                                {r}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {(!task.team || task.team.length === 0) && (
+                      <div className="text-center py-12 text-slate-300 italic">
+                        <Users className="w-8 h-8 mx-auto opacity-20 mb-2" />
+                        <p className="text-xs font-bold">チームメンバーが設定されていません</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-amber-50 p-6 rounded-3xl border border-amber-100">
+                <h5 className="text-[10px] font-black text-amber-600 uppercase tracking-widest mb-2 flex items-center gap-2">
+                  <Award className="w-4 h-4" /> 評価権限について
+                </h5>
+                <p className="text-[11px] font-bold text-amber-700 leading-relaxed">
+                  タスク評価は、タスク完了後に「責任者（リーダー）」または「矢追和彦」が行います。
+                  管理職（Admin）は、全ての評価を編集・修正することが可能です。
                 </p>
               </div>
             </div>

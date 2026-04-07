@@ -4,7 +4,7 @@ import { MessageSquare, TrendingUp, Clock } from 'lucide-react';
 
 interface Props {
   tasks: Task[];
-  onTaskClick: (taskId: string) => void;
+  onTaskClick: (taskId: string, type?: 'progress' | 'comment') => void;
 }
 
 interface ActivityItem {
@@ -68,7 +68,7 @@ export const ActivityFeed: React.FC<Props> = ({ tasks, onTaskClick }) => {
     <div className="bg-white p-6 md:p-8 rounded-[2rem] shadow-sm border border-slate-100">
       <h2 className="text-xl font-black text-slate-800 mb-6 flex items-center gap-2">
         <Clock className="w-6 h-6 text-slate-400" />
-        アクティビティ履歴
+        最新の書き込み: {activities[0]?.author || '履歴なし'}
       </h2>
       
       <div className="space-y-6">
@@ -91,7 +91,7 @@ export const ActivityFeed: React.FC<Props> = ({ tasks, onTaskClick }) => {
                 {activity.content}
               </p>
               <button 
-                onClick={() => onTaskClick(activity.taskId)}
+                onClick={() => onTaskClick(activity.taskId, activity.type)}
                 className="text-xs font-bold text-red-600 hover:text-red-700 bg-red-50 px-3 py-1.5 rounded-lg transition-colors truncate max-w-full"
               >
                 {activity.taskTitle}

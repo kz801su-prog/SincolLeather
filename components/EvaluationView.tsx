@@ -1,6 +1,6 @@
 
 import React, { useMemo } from 'react';
-import { Task, MemberInfo, TaskStatus } from '../types';
+import { Task, MemberInfo, TaskStatus, ProjectConcept, TaskEvaluation } from '../types';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
   PieChart, Pie, Cell, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar
@@ -15,16 +15,18 @@ interface Props {
   isAdmin?: boolean;
   currentUserName?: string;
   isTopPage?: boolean;
+  projectConcept?: ProjectConcept | null;
 }
 
-export const EvaluationView: React.FC<Props> = ({
-  tasks,
-  members,
-  onTaskClick,
-  viewMode = 'all',
-  isAdmin = false,
+export const EvaluationView: React.FC<Props> = ({ 
+  tasks, 
+  members, 
+  onTaskClick, 
+  viewMode = 'all', 
+  isAdmin = false, 
   currentUserName = '',
-  isTopPage = false
+  isTopPage = false,
+  projectConcept = null
 }) => {
   const completedTasks = useMemo(() => tasks.filter(t => !t.isSoftDeleted && t.status === TaskStatus.COMPLETED), [tasks]);
   const evaluatedTasks = useMemo(() => completedTasks.filter(t => t.evaluation && t.evaluation.memberEvaluations?.length > 0), [completedTasks]);
@@ -349,6 +351,42 @@ export const EvaluationView: React.FC<Props> = ({
           )}
         </div>
       </div>
+
+      {projectConcept?.epicEvaluations && Object.keys(projectConcept.epicEvaluations).length > 0 && (
+        <div className="bg-white p-8 rounded-[2.5rem] border border-slate-100 shadow-sm overflow-hidden">
+          <h3 className="font-black text-lg text-slate-800 mb-6">エピック評価状況</h3>
+          <div className="space-y-3">
+            {Object.entries(projectConcept.epicEvaluations).map(([epicName, evaluation]) => (
+              <div
+                key={epicName}
+                className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100"
+              >
+                <div className="flex items-center gap-4 min-w-0">
+                  <div className="w-10 h-10 rounded-xl bg-red-100 text-red-600 flex items-center justify-center flex-shrink-0">
+                    <Award className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-bold text-slate-700 truncate">{epicName}</p>
+                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">
+                      難易度: {evaluation.difficulty} / 成果: {evaluation.outcome}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="flex gap-0.5">
+                    {[1, 2, 3, 4, 5].map(star => (
+                      <Star 
+                        key={star} 
+                        className={`w-3 h-3 ${star <= (evaluation.outcome || 0) ? 'fill-amber-400 text-amber-400' : 'text-slate-200'}`} 
+                      />
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {viewMode === 'all' && (
         <div className="bg-white p-8 rounded-[2.5rem] border border-slate-100 shadow-sm overflow-hidden">

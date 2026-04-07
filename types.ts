@@ -51,12 +51,15 @@ export interface TaskEvaluation {
   difficulty: number; // 難易度点数 (例: 50)
   outcome: 1 | 2 | 3 | 4 | 5; // 出来栄え (1=20%, 5=100%)
   memberEvaluations: MemberEvaluation[];
+  comment?: string; // 評価コメント (New)
+  memberRatings?: Record<string, number>; // エピック評価用 (New)
 }
 
 export interface ProjectConcept {
   name: string;
   content: string;
   attachments: Attachment[];
+  epicEvaluations?: Record<string, TaskEvaluation>;
 }
 
 export interface Task {
