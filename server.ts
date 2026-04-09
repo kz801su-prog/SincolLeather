@@ -1,4 +1,5 @@
-import express, { Request, Response } from 'express';
+import express from 'express';
+import type { Request, Response } from 'express';
 import mysql from 'mysql2/promise';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -41,7 +42,8 @@ const getPool = () => {
       user: process.env.MYSQL_USER || 'root',
       password: process.env.MYSQL_PASSWORD || '',
       database: process.env.MYSQL_DATABASE || 'board_db',
-      port: parseInt(process.env.MYSQL_PORT || '3306'),
+      port: parseInt(process.env.MYSQL_PORT || '3306') || 3306,
+      connectTimeout: 10000, // 10 seconds
     };
     console.log('Initializing MySQL Pool with:', { ...config, password: '***' });
     pool = mysql.createPool(config);
@@ -201,7 +203,7 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*', (req: Request, res: Response) => {
+    app.get('*all', (req: Request, res: Response) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

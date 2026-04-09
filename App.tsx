@@ -205,8 +205,9 @@ const App: React.FC = () => {
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
 
     if (immediate) {
-      // 強制保存の場合はキューを待たずに直接実行（ただし並列実行を防ぐためisSavingRefも考慮したいが、
-      // ユーザーが明示的に押したボタンなので最優先で実行する）
+      // 強制保存の場合はキューを待たずに直接実行
+      isSavingRef.current = true;
+      saveQueueRef.current.delete(task.id); // キューにあれば削除
       try {
         await saveSingleTaskToSheet(task, settings.gasUrl, undefined, members, undefined, settings.cliqUrl);
         await saveTaskToMySQL(task);
@@ -215,6 +216,8 @@ const App: React.FC = () => {
         setErrorMsg(e.message || "強制保存に失敗しました");
         console.error("Direct save error:", e);
         throw e;
+      } finally {
+        isSavingRef.current = false;
       }
     } else {
       saveQueueRef.current.set(task.id, task);
@@ -393,7 +396,8 @@ const App: React.FC = () => {
       const updatedTask = updater(prev[taskIndex]);
       
       if (saveMode !== 'none') {
-        handleSingleTaskSave(updatedTask, saveMode === 'immediate');
+        // 副作用をupdaterの外に出す
+        setTimeout(() => handleSingleTaskSave(updatedTask, saveMode === 'immediate'), 0);
       }
 
       const nextTasks = [...prev];
@@ -466,6 +470,7 @@ const App: React.FC = () => {
 
   const updateTask = (updatedTask: Task) => {
     setTasks(prev => prev.map(t => t.id === updatedTask.id ? updatedTask : t));
+    handleSingleTaskSave(updatedTask, false); // キューに入れて保存
   };
 
   const updateTasks = (updatedTasks: Task[]) => {
@@ -474,6 +479,8 @@ const App: React.FC = () => {
       const filtered = prev.filter(t => !updatedIds.has(t.id));
       return [...filtered, ...updatedTasks];
     });
+    // 全ての更新されたタスクをキューに入れて保存
+    updatedTasks.forEach(t => handleSingleTaskSave(t, false));
   };
 
   const softDeleteTask = (taskId: string) => {
@@ -975,7 +982,7 @@ const App: React.FC = () => {
                     }}
                     onMarkAsViewed={() => markTaskAsViewed(task.id)}
                     onManualSync={async (t) => {
-                      updateTaskAndSave(t.id, task => task, 'immediate');
+                      updateTaskAndSave(t.id, () => t, 'immediate');
                     }}
                     onDeleteTask={softDeleteTask}
                     onAddSubTask={addSubTask}
@@ -1421,7 +1428,7 @@ const App: React.FC = () => {
                   }}
                   onMarkAsViewed={() => markTaskAsViewed(t.id)}
                   onManualSync={async (taskObj) => {
-                    updateTaskAndSave(taskObj.id, t2 => t2, 'immediate');
+                    updateTaskAndSave(taskObj.id, () => taskObj, 'immediate');
                   }}
                   onDeleteTask={(tid) => { softDeleteTask(tid); setTimelineSelectedTaskId(null); }}
                   onAddSubTask={addSubTask}
