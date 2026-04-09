@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { Task, TaskStatus, TaskPriority, MemberInfo, TaskComment, ProjectConcept, Attachment } from './types';
 import { fetchTasksFromSheet, syncAllTasksToSheet, saveSingleTaskToSheet, saveProjectConceptToSheet, saveEpicsToSheet, cleanupSheet } from './googleSheetsService';
+import { saveTaskToMySQL, saveProjectConceptToMySQL, saveEpicsToMySQL, syncAllTasksToMySQL } from './mysqlService';
 import { analyzeProgress } from './geminiService';
 import { DashboardCards } from './components/DashboardCards';
 import { TaskItem } from './components/TaskItem';
@@ -125,6 +126,7 @@ const App: React.FC = () => {
     localStorage.setItem('board_project_concept', JSON.stringify(newConcept));
     try {
       await saveProjectConceptToSheet(newConcept, settings.gasUrl);
+      await saveProjectConceptToMySQL(newConcept);
     } catch (e) {
       console.error("Failed to save project concept:", e);
     }
@@ -147,6 +149,18 @@ const App: React.FC = () => {
   const isSavingRef = useRef(false);
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (saveQueueRef.current.size > 0 || isSavingRef.current) {
+        e.preventDefault();
+        e.returnValue = 'データの保存中です。ページを離れると変更が失われる可能性があります。';
+        return e.returnValue;
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []);
+
   const processQueue = useCallback(async () => {
     if (isSavingRef.current || saveQueueRef.current.size === 0) return;
 
@@ -164,6 +178,7 @@ const App: React.FC = () => {
     try {
       console.log("[SaveQueue] Executing save for:", taskToSave.title, "uuid:", taskToSave.uuid);
       await saveSingleTaskToSheet(taskToSave, settings.gasUrl, undefined, members, undefined, settings.cliqUrl);
+      await saveTaskToMySQL(taskToSave);
       console.log("[SaveQueue] Save completed for:", taskToSave.title);
     } catch (e: any) {
       setErrorMsg(e.message || "タスクの保存に失敗しました");
@@ -178,7 +193,7 @@ const App: React.FC = () => {
   }, [settings.gasUrl, members, settings.cliqUrl]);
 
   // セーブキュー: 同時に1つしかPOSTが走らないようにする
-  const handleSingleTaskSave = useCallback((task: Task, immediate = false) => {
+  const handleSingleTaskSave = useCallback(async (task: Task, immediate = false) => {
     if (!settings.gasUrl) {
       if (immediate) {
         setErrorMsg("設定画面でGAS WebアプリのURLを入力してください。保存できません。");
@@ -189,20 +204,23 @@ const App: React.FC = () => {
 
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
 
-    const addToQueue = (t: Task) => {
-      saveQueueRef.current.set(t.id, t);
-      processQueue();
-    };
-
     if (immediate) {
-      addToQueue(task);
+      // 強制保存の場合はキューを待たずに直接実行（ただし並列実行を防ぐためisSavingRefも考慮したいが、
+      // ユーザーが明示的に押したボタンなので最優先で実行する）
+      try {
+        await saveSingleTaskToSheet(task, settings.gasUrl, undefined, members, undefined, settings.cliqUrl);
+        await saveTaskToMySQL(task);
+        console.log("[DirectSave] Save completed for:", task.title);
+      } catch (e: any) {
+        setErrorMsg(e.message || "強制保存に失敗しました");
+        console.error("Direct save error:", e);
+        throw e;
+      }
     } else {
-      saveTimeoutRef.current = setTimeout(() => {
-        addToQueue(task);
-        saveTimeoutRef.current = null;
-      }, 1500);
+      saveQueueRef.current.set(task.id, task);
+      processQueue();
     }
-  }, [settings.gasUrl, processQueue]);
+  }, [settings.gasUrl, members, settings.cliqUrl, processQueue]);
 
   const markAllTasksAsViewed = useCallback(() => {
     if (!settings.userName) return;
@@ -340,6 +358,8 @@ const App: React.FC = () => {
     setLoading(true);
     try {
       await syncAllTasksToSheet(currentTasks, settings.gasUrl, undefined, currentMembers, undefined, settings.cliqUrl, currentProjectConcept);
+      await syncAllTasksToMySQL(currentTasks);
+      await saveProjectConceptToMySQL(currentProjectConcept);
     } catch (e) {
       setErrorMsg('保存エラーが発生しました。');
     } finally {
@@ -1194,6 +1214,7 @@ const App: React.FC = () => {
                               if (prev.includes(newEpicName)) return prev;
                               const next = [...prev, newEpicName];
                               saveEpicsToSheet(next, settings.gasUrl);
+                              saveEpicsToMySQL(next);
                               return next;
                             });
                             setNewEpicName('');
@@ -1211,6 +1232,7 @@ const App: React.FC = () => {
                             setEpics(prev => {
                               const next = prev.filter((_, i) => i !== idx);
                               saveEpicsToSheet(next, settings.gasUrl);
+                              saveEpicsToMySQL(next);
                               return next;
                             });
                           }} className="p-1.5 text-rose-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all">

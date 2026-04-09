@@ -166,9 +166,12 @@ export const TaskItem: React.FC<Props> = ({
     handleUpdateEvaluation({ memberEvaluations: newMemberEvals });
   };
 
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
+
   const handleSave = async (e: React.MouseEvent) => {
     e.stopPropagation();
     setIsSaving(true);
+    setSaveStatus('saving');
     try {
       // タイトル編集中に保存ボタンが押された場合、入力内容をReactのstateに反映させる。
       // ただし、直後にonManualSyncでサーバーへ送るため、onUpdateTaskDetailsでは通信フラグ(immediate)をfalseにする。
@@ -180,8 +183,13 @@ export const TaskItem: React.FC<Props> = ({
       }
       // 最新のデータを手動保存
       await onManualSync(currentTaskToSave);
-      setIsExpanded(false);
+      setSaveStatus('saved');
+      setTimeout(() => {
+        setSaveStatus('idle');
+        setIsExpanded(false);
+      }, 800);
     } catch (e) {
+      setSaveStatus('idle');
       if (onShowMessage) {
         onShowMessage('エラー', '保存に失敗しました');
       } else {
@@ -487,10 +495,18 @@ export const TaskItem: React.FC<Props> = ({
             <button
               onClick={handleSave}
               disabled={isSaving}
-              className="bg-red-600 text-white px-4 py-2 rounded-lg font-black text-xs flex items-center gap-1.5 shadow-md hover:bg-red-700 active:scale-95 transition-all"
+              className={`px-4 py-2 rounded-lg font-black text-xs flex items-center gap-1.5 shadow-md active:scale-95 transition-all ${
+                saveStatus === 'saved' ? 'bg-emerald-500 text-white' : 'bg-red-600 text-white hover:bg-red-700'
+              }`}
             >
-              {isSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
-              <span>保存</span>
+              {saveStatus === 'saving' ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : saveStatus === 'saved' ? (
+                <Check className="w-3 h-3" />
+              ) : (
+                <Save className="w-3 h-3" />
+              )}
+              <span>{saveStatus === 'saving' ? '保存中...' : saveStatus === 'saved' ? '完了!' : '保存'}</span>
             </button>
           </div>
 
